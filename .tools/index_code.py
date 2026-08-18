@@ -394,10 +394,10 @@ def init_db(con: sqlite3.Connection) -> None:
         );
         CREATE INDEX symbol_annotations_symbol_idx ON symbol_annotations(symbol);
 
-        -- ONE FIX IS MANY COMMITS, and git cannot say which belong together. The wrap-destination
-        -- fix is three commits on two branches; dump-drop-policy is eight across all three; and
-        -- from `git log` on 1.18 you cannot tell that cc850c23 is DELIBERATELY absent rather than
-        -- forgotten. The notes already group them, in prose. This makes that grouping queryable.
+        -- ONE FIX IS MANY COMMITS, and git cannot say which belong together. A single fix can be
+        -- three commits across two branches, or eight across all of them; and from `git log` alone
+        -- you cannot tell that a commit is DELIBERATELY absent from a branch rather than forgotten.
+        -- The notes already group them, in prose. This makes that grouping queryable.
         -- `branches` is DERIVED at index time from git, never stored in the KB, so it cannot go
         -- stale when a fix is ported.
         CREATE TABLE commit_links(
@@ -1020,8 +1020,9 @@ def scan_refs(con: sqlite3.Connection, files: list[Path]) -> None:
         # test, which is why a single-wire port never reaches it.
         # Nearest PRECEDING definition -- approximate at a file's tail, and honest about it.
         # Headers are mostly prototypes, which sit inside no function at all -- attributing them to
-        # the nearest definition above produces a confident wrong answer (a declaration in
-        # Eth2Serial_internal.h came back attributed to `delivered`). Better blank than wrong.
+        # the nearest definition above produces a confident wrong answer -- a prototype in a
+        # header gets attributed to whatever happened to be defined above it. Better blank than
+        # wrong.
         defs = [] if path.suffix.lower() in (".h", ".hpp") else enclosing_symbol_map(con, rpath)
         di = 0
         cur_sym = ""
@@ -1037,7 +1038,9 @@ def scan_refs(con: sqlite3.Connection, files: list[Path]) -> None:
                 )
 
 
-COMMIT_BRANCHES = ("Smart", "uart-detect", "arm-conversion")
+# WHICH BRANCHES TO WALK belongs to the host project, so it comes from kb.config.json. With
+# none configured the commit map is simply not built -- the feature is off, not broken.
+COMMIT_BRANCHES = tuple(PROJECT.get("commit_branches") or ())
 COMMIT_SHA_RE = re.compile(r"\b[0-9a-f]{8,40}\b")
 
 
@@ -1103,9 +1106,9 @@ def link_annotations_to_symbols(con: sqlite3.Connection) -> int:
     from the function.
     """
     # HOW MANY PLACES DEFINE THIS NAME, and where. A bare-name link is only trustworthy when the
-    # name is distinctive: `main` has 80 definitions here AND is a path component of every source
-    # file (wt32-eth01/main/...), so scanning an entry's prose for it linked 42 unrelated notes to
-    # it. That is not ambiguity, it is a false positive on a path fragment.
+    # name is distinctive: a name like `main` can have dozens of definitions in one tree AND be a
+    # path component of every source file, so scanning an entry's prose for it links piles of
+    # unrelated notes to it. That is not ambiguity, it is a false positive on a path fragment.
     defs: dict[str, int] = {}
     files_by_name: dict[str, set] = {}
     for name_, file_ in con.execute("SELECT name, file FROM symbols"):
@@ -1263,10 +1266,10 @@ def update_symbol_lifecycle(con: sqlite3.Connection, branch: str, timestamp: str
             ),
         )
 
-    # ONLY A FULL SCAN MAY DELETE. roots is nargs="*", so `index_code.py Eth2Serial` indexes one
+    # ONLY A FULL SCAN MAY DELETE. roots is nargs="*", so `index_code.py <subdir>` indexes ONE
     # subtree -- and marking every active symbol it did not see as deleted would wipe the history
-    # of wt32-eth01, udp2serial and the rest, which is exactly the persistent data the lifecycle
-    # exists to keep. A partial scan updates what it saw and touches nothing else.
+    # of every other root, which is exactly the persistent data the lifecycle exists to keep.
+    # A partial scan updates what it saw and touches nothing else.
     if not full_scan:
         return
     deleted_rows = con.execute(
@@ -1681,10 +1684,13 @@ def load_params(con: sqlite3.Connection) -> None:
     except Exception as exc:                      # never let the map take the whole index down
         print(f"parameter map skipped: {exc}", file=sys.stderr)
         return
-    for target, wt32 in (("wt32", True), ("c3", False)):
+    # THE TARGET NAMES BELONG TO THE PROJECT, not to the engine. kb.config.json supplies them as
+    # [[name, primary_flag], ...]; the flag is whatever the project's own plugin wants to
+    # switch on. Nothing here should have to know what a given project calls its variants.
+    for target, primary in [tuple(x) for x in (PROJECT.get("param_targets") or [])]:
         try:
-            fields = gen_param_map.value_map(wt32)
-            src = str(gen_param_map.sources(wt32)[0].relative_to(REPO_ROOT))
+            fields = gen_param_map.value_map(primary)
+            src = str(gen_param_map.sources(primary)[0].relative_to(REPO_ROOT))
         except Exception:
             continue                              # branch without that target's web source
         for field, spec in fields.items():

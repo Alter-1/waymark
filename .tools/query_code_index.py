@@ -312,7 +312,7 @@ def main() -> int:
     p = sub.add_parser("param")
     p.add_argument("term", help="a field id (FU), a VALUE seen on a device (2, '*'), or words from "
                                 "the meaning (single wire)")
-    p.add_argument("--target", default="", help="wt32 or c3; both by default")
+    p.add_argument("--target", default="", help="restrict to one target from the parameter map; all by default")
     p.add_argument("--limit", type=int, default=80)
 
     p = sub.add_parser("constant")
