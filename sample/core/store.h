@@ -27,9 +27,24 @@ public:
 
     size_t live_keys() const;
 
+    /* Drop the in-memory index. The log on disk is untouched, so the next open() rebuilds it. */
+    void reset();
+
 private:
     std::map<std::string, uint64_t> index_;
     bool dirty_;
+};
+
+/* A read-through cache in front of the store. Deliberately also has a reset(), because a bare
+   name that matches two classes is exactly the case a link resolver must refuse to guess at. */
+class Snapshot {
+public:
+    Snapshot();
+    bool capture(const Store& from);
+    void reset();
+
+private:
+    size_t entries_;
 };
 
 #endif

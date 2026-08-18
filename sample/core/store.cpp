@@ -62,3 +62,20 @@ void Store::flush_pending() {
 size_t Store::live_keys() const {
     return index_.size();
 }
+
+void Store::reset() {
+    index_.clear();
+    dirty_ = false;
+}
+
+Snapshot::Snapshot() : entries_(0) {
+}
+
+bool Snapshot::capture(const Store& from) {
+    entries_ = from.live_keys();
+    return true;
+}
+
+void Snapshot::reset() {
+    entries_ = 0;
+}
