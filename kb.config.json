@@ -1,0 +1,7 @@
+{
+  "_comment": "Project coupling for waymark. The engine ships neutral defaults; this file is what points it at a particular codebase. Keep project names, paths and dialects here, never in .tools/*.py.",
+  "roots": ["sample"],
+  "annotations": "Docs/source_index_annotations.json",
+  "version_file": "sample/include/version.h",
+  "api_regex": "(KV\\+[A-Za-z0-9_?=:+,.-]*|\\?[A-Za-z0-9_*][A-Za-z0-9_=&*.,+-]*)"
+}

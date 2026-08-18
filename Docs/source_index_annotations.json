@@ -1,0 +1,251 @@
+{
+ "schema": 1,
+ "scope": "sample",
+ "concepts": [
+  {
+   "concept_id": "store.durability",
+   "name": "durability-policy",
+   "kind": "design_rule",
+   "symbols": [
+    "wal_append",
+    "Store::put"
+   ],
+   "meaning": "How a write becomes durable, and what a crash may lose.",
+   "notes": ""
+  },
+  {
+   "concept_id": "store.compaction",
+   "name": "compaction",
+   "kind": "subsystem",
+   "symbols": [
+    "Store::compact"
+   ],
+   "meaning": "Rewriting the log to drop superseded and deleted records.",
+   "notes": ""
+  },
+  {
+   "concept_id": "api.kv.dialect",
+   "name": "kv-dialect",
+   "kind": "interface",
+   "symbols": [],
+   "meaning": "The two command dialects a kvlog server speaks.",
+   "notes": ""
+  }
+ ],
+ "symbols": [
+  {
+   "name": "wal_replay",
+   "notes": "Replay STOPS at the first bad magic or CRC and reports success. A torn tail is the NORMAL state after a crash, not corruption -- treating it as an error made every unclean restart look like data loss.",
+   "keywords": [
+    "wal",
+    "replay",
+    "torn-tail",
+    "crash-recovery",
+    "not-an-error"
+   ]
+  }
+ ],
+ "symbol_comments": [],
+ "routes": [
+  {
+   "name": "KV+PUT",
+   "file": "sample/cli/kvctl.py",
+   "notes": "Client -> server write path: KvClient.put -> KV+PUT -> Store::put -> wal_append. The acknowledgement is sent only after the WAL accepts the record.",
+   "keywords": [
+    "route",
+    "write-path",
+    "put"
+   ]
+  }
+ ],
+ "features": [
+  {
+   "name": "durability-policy",
+   "concept_id": "store.durability",
+   "kind": "feature",
+   "status": "n/a",
+   "evidence": "measured",
+   "min_fw": "0.2+",
+   "files": [
+    "sample/core/wal.c",
+    "sample/core/wal.h"
+   ],
+   "commits": [],
+   "keywords": [
+    "durability",
+    "fsync",
+    "sync-policy",
+    "WAL_SYNC_BATCH",
+    "crash",
+    "lost-write",
+    "what-can-i-lose"
+   ],
+   "brief": "Three policies: NEVER (tests only), BATCH (default), ALWAYS. BATCH can lose the last un-flushed batch on a crash, and that is BY DESIGN -- it is not the cause of the lost-write bug people keep attributing to it.",
+   "notes": "WAL_SYNC_BATCH is the default and flushes when the segment fills or when the caller asks.\nAn idle process must not sit on an unflushed record for ever, which is why Store has an idle\ntimer calling flush_pending().\n\nWHAT A CRASH CAN COST YOU, by policy:\n  NEVER  -- everything not yet written by the OS. Tests only.\n  BATCH  -- the current unflushed batch, bounded by the idle timer.\n  ALWAYS -- nothing acknowledged, at roughly 8x the write cost (measured, 0.3).",
+   "see_also": [
+    {
+     "type": "symbol",
+     "target": "wal_append",
+     "note": "the only place the policy is consulted"
+    },
+    {
+     "type": "constant",
+     "target": "WAL_SEGMENT_SIZE",
+     "note": "a batch is bounded by the segment, not by time alone"
+    }
+   ]
+  },
+  {
+   "name": "compaction",
+   "concept_id": "store.compaction",
+   "kind": "bug",
+   "status": "resolved",
+   "evidence": "measured",
+   "min_fw": "0.1-0.3 affected, fixed in 0.4",
+   "files": [
+    "sample/core/store.cpp"
+   ],
+   "commits": [],
+   "keywords": [
+    "compaction",
+    "segment-grows",
+    "disk-full",
+    "never-finishes",
+    "lost-write",
+    "writes-disappear",
+    "root-cause",
+    "OPEN-then-resolved"
+   ],
+   "brief": "RESOLVED in 0.4. Compaction appeared to never finish and the segment grew without bound under sustained writes. Root cause was compaction reading the LIVE index instead of a snapshot, so it copied records that arrived after it started -- it was chasing its own tail. The fsync policy was blamed for months and was never involved.",
+   "notes": "SYMPTOM: under sustained writes, compact() returned true but the segment kept growing, and\nusers reported writes 'disappearing' after a restart.\n\nROOT CAUSE: compact() walked the live index while writers were still appending, so every record\nwritten during the copy was itself copied, and the pass could not converge. The apparent data loss\nwas a second-order effect: the segment swap picked up a partially written new segment.\n\nFIX (0.4): snapshot the index first and copy only that set. Anything written during the pass stays\nin the current segment and is picked up by the NEXT compaction. The comment at the top of\nStore::compact() states this, because the obvious 'improvement' is to read the live index.\n\nHOW TO TELL IT IS BACK: live_keys() stays flat while the segment size climbs across two\nconsecutive compactions.",
+   "claims": [
+    {
+     "status": "dead",
+     "evidence": "measured",
+     "dated": "2026-03-02",
+     "text": "The lost writes are caused by WAL_SYNC_BATCH not flushing before the segment swap, so setting WAL_SYNC_ALWAYS should fix it.",
+     "killed_by": "reproduced with WAL_SYNC_ALWAYS at 8x the write cost: identical growth and identical lost writes. The policy was never involved."
+    },
+    {
+     "status": "dead",
+     "evidence": "inferred",
+     "dated": "2026-03-05",
+     "text": "STORE_MAX_KEYS is being hit, so put() silently refuses and the write is lost.",
+     "killed_by": "put() returns false on refusal and the client logs it; the reproduction shows put() returning true for records that later vanish."
+    },
+    {
+     "status": "live",
+     "evidence": "measured",
+     "dated": "2026-03-11",
+     "text": "Compaction copies records written after it started: with writers paused, a compaction that had run for 40 minutes converged in under a second."
+    },
+    {
+     "status": "open",
+     "evidence": "inferred",
+     "dated": "2026-03-11",
+     "text": "Whether a compaction interrupted by SIGKILL can leave a half-swapped segment that replay accepts. NEVER REPRODUCED -- inferred safe from rename() being atomic on the target filesystem, which is an assumption, not a measurement. Settle it with a kill -9 loop under sustained writes."
+    }
+   ],
+   "see_also": [
+    {
+     "type": "symbol",
+     "target": "compact",
+     "note": "bare name on purpose: the engine resolves it to Store::compact"
+    },
+    {
+     "type": "concept",
+     "target": "store.durability",
+     "note": "the hypothesis that died here"
+    },
+    {
+     "type": "file",
+     "target": "sample/core/store.cpp",
+     "note": "the fix and the comment guarding it"
+    }
+   ]
+  },
+  {
+   "name": "kv-dialect",
+   "concept_id": "api.kv.dialect",
+   "kind": "reference",
+   "status": "n/a",
+   "evidence": "unknown",
+   "min_fw": "all",
+   "files": [
+    "sample/cli/kvctl.py",
+    "sample/web/status.html"
+   ],
+   "commits": [],
+   "keywords": [
+    "api",
+    "dialect",
+    "KV+PUT",
+    "KV+GET",
+    "?stats",
+    "protocol",
+    "which-endpoint"
+   ],
+   "brief": "Two dialects on purpose: KV+xxx is line-oriented over TCP for scripts, ?xxx is HTTP returning JSON for browsers. They are not interchangeable and neither is a wrapper around the other.",
+   "notes": "KV+PUT / KV+GET are request/response over TCP with tiny frames -- set TCP_NODELAY or Nagle adds\na full RTT per call and a fast server measures slow.\n\n?stats returns a FLAT object and OMITS counters the build does not have, rather than sending null.\nSo a missing field means 'this build has no such counter', not 'the counter is zero'.",
+   "see_also": [
+    {
+     "type": "annotation",
+     "target": "compaction",
+     "note": "?stats is how you watch for the growth signature"
+    }
+   ]
+  },
+  {
+   "name": "idle-flush-under-sustained-load",
+   "concept_id": "store.durability",
+   "kind": "bug",
+   "status": "open",
+   "evidence": "inferred",
+   "min_fw": "0.2+",
+   "files": [
+    "sample/core/store.cpp",
+    "sample/core/wal.c"
+   ],
+   "commits": [],
+   "keywords": [
+    "OPEN",
+    "idle-timer",
+    "flush_pending",
+    "BATCH",
+    "unbounded-loss",
+    "busy-process",
+    "never-flushes",
+    "durability",
+    "how-much-can-i-lose"
+   ],
+   "brief": "OPEN. WAL_SYNC_BATCH promises that a crash loses at most the current batch, bounded by an idle timer. But the timer only runs when the process goes idle, and a continuously busy server may never be idle -- in which case the bound is the SEGMENT SIZE, not a time. Not yet measured; if it holds, the durability documentation is wrong rather than the code.",
+   "notes": "WHY IT IS SUSPECTED: flush_pending() is called from the idle timer and from close(). Neither\nfires while the server is saturated, and wal_append() only resets the buffer when the segment is\nfull. So under sustained writes the exposure window looks bounded by WAL_SEGMENT_SIZE (4 MiB)\nrather than by any interval.\n\nWHAT WOULD SETTLE IT, cheapest first:\n  1. Instrument flush_pending() with a counter and drive the server at saturation for a minute.\n     If the counter stays at zero the bound is the segment, and the docs are wrong.\n  2. If confirmed, decide which is the bug: a timer that cannot fire, or a promise that should\n     have said 'a segment' all along. Prefer changing the promise -- adding a forced flush on a\n     hot path is how the 8x cost of WAL_SYNC_ALWAYS gets reintroduced by accident.\n\nDO NOT confuse this with the compaction bug: that one is RESOLVED and had nothing to do with the\nsync policy. This is about the policy actually delivering what it claims.",
+   "claims": [
+    {
+     "status": "open",
+     "evidence": "inferred",
+     "dated": "2026-08-18",
+     "text": "Under sustained load flush_pending() never runs, so WAL_SYNC_BATCH's exposure is bounded by WAL_SEGMENT_SIZE rather than by the idle interval. Inferred from the call sites only -- never measured."
+    }
+   ],
+   "see_also": [
+    {
+     "type": "annotation",
+     "target": "durability-policy",
+     "note": "the promise this may contradict"
+    },
+    {
+     "type": "symbol",
+     "target": "flush_pending",
+     "note": "bare name; resolves to Store::flush_pending"
+    },
+    {
+     "type": "constant",
+     "target": "WAL_SEGMENT_SIZE",
+     "note": "the real bound, if this is confirmed"
+    }
+   ]
+  }
+ ],
+ "annotations": null
+}

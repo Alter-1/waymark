@@ -1,0 +1,8 @@
+.tools/code_index.sqlite
+.tools/code_index.sqlite-*
+.tools/code_index.json
+.tools/code_index.*.sqlite
+.tools/code_index.*.sqlite-*
+.tools/code_index.*.json
+.tools/kb-backups/
+__pycache__/

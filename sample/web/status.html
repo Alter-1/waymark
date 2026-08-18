@@ -1,0 +1,27 @@
+<!doctype html>
+<title>kvlog status</title>
+<body>
+<table id=stats></table>
+<script>
+const REFRESH_MS = 2000;
+
+function renderStats(d) {
+  // The server answers ?stats with a flat object; anything it does not know is omitted
+  // rather than sent as null, so a missing field means "this build has no such counter".
+  const t = document.getElementById('stats');
+  t.textContent = '';
+  for (const k of Object.keys(d)) {
+    const row = t.insertRow();
+    row.insertCell().textContent = k;
+    row.insertCell().textContent = d[k];
+  }
+}
+
+function poll() {
+  fetch('?stats').then(r => r.json()).then(renderStats);
+}
+
+setInterval(poll, REFRESH_MS);
+poll();
+</script>
+</body>
