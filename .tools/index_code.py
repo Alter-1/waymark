@@ -1671,6 +1671,11 @@ def load_params(con: sqlite3.Connection) -> None:
     # `--write` here made `index_code.py` silently modify Docs/param_map_*.txt, so a rebuild --
     # something done constantly and casually -- produced working-tree changes the author never
     # asked for. --write stays an explicit maintenance command; this only READS the web source.
+    # AN UNCONFIGURED PLUGIN IS NOT A PROBLEM TO REPORT. Only a project that ASKS for the param
+    # map hears about it failing; everyone else got "parameter map skipped: No module named ..."
+    # on every single build, which is noise pretending to be a warning.
+    if "gen_param_map" not in (PROJECT.get("plugins") or []):
+        return
     try:
         import gen_param_map
     except Exception as exc:                      # never let the map take the whole index down
