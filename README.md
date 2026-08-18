@@ -119,6 +119,13 @@ missing annotation file and is silently EMPTY, a `see_also` pointing at somethin
 exists, a claim with no provenance so an inference reads like a measurement. It exits non-zero, so
 it belongs in a pre-commit hook or CI.
 
+## Handing work to the next context
+
+Waymark keeps durable facts queryable; a handover records current working state. Use both when a
+session stops mid-investigation: put facts and dead hypotheses into the KB first, rebuild and run
+`selftest`, then write a short handover with repo state, hardware/runtime state, what is proven, and
+the next concrete action. See `Docs/HANDOVER.md`.
+
 ## Using it on your own project
 
 Copy `.tools/` into your repository and write a `kb.config.json` at the root:
