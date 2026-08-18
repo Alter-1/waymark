@@ -1,0 +1,26 @@
+name: tests
+
+# The engine is copied into the projects that use it, so a regression here is a regression
+# everywhere it has been vendored. Run the checks on every push rather than trusting that
+# whoever changed it remembered to.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the index on the sample project
+        run: python3 .tools/index_code.py --force
+
+      - name: Check the knowledge base
+        # exits non-zero on an unresolved link, a claim with no provenance, or an index that
+        # built from a missing annotation file and came back silently empty
+        run: python3 .tools/query_code_index.py selftest
+
+      - name: Check the engine
+        run: python3 tests/test_engine.py
