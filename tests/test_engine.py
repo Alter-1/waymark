@@ -123,6 +123,22 @@ def main():
 
         rc, out, _ = query("selftest", cwd=far)
         check("foreign repo: selftest PASSES for a project with no KB yet", rc == 0, out.strip()[-200:])
+        check("foreign repo: a codebase with constants reports them",
+              re.search(r"constants non-empty[\s\S]{0,40}ok", out) is not None, out.strip()[-200:])
+
+    # a codebase that legitimately defines NO constants must not be judged for it
+    with tempfile.TemporaryDirectory() as td2:
+        bare = Path(td2)
+        (bare / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (bare / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (bare / "src").mkdir()
+        (bare / "src" / "plain.c").write_text("int f(int n) { return n; }\n", encoding="utf-8")
+        run([str(bare / ".tools" / "index_code.py")], cwd=bare)
+        rc, out, _ = query("selftest", cwd=bare)
+        check("a codebase with NO constants still passes selftest", rc == 0, out.strip()[-200:])
+        check("no constants is reported n/a, not a problem",
+              re.search(r"constants non-empty[\s\S]{0,40}n/a", out) is not None, out.strip()[-200:])
         check("foreign repo: the empty KB is reported n/a, not a problem",
               re.search(r"annotations non-empty[\s\S]{0,40}n/a", out) is not None, out.strip()[-200:])
 

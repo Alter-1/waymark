@@ -437,8 +437,18 @@ def main() -> int:
                 counts[t] = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
             except Exception:
                 counts[t] = -1
-        for t in ("files", "symbols", "constants"):
+        for t in ("files", "symbols"):
             chk(f"{t} non-empty", counts[t] > 0, f"{counts[t]} rows")
+
+        # A CODEBASE WITH NO CONSTANTS IS NOT A BROKEN INDEX. files and symbols already prove the
+        # index is not empty, which is the whole point of this guard; a C file with no #define, or a
+        # project whose constants are simply not SHOUTED, legitimately has none. Failing there made
+        # selftest red for a project that had done nothing wrong -- the same mistake as judging a
+        # project for not having written its first annotation yet. Report it, do not judge it.
+        if counts["constants"] > 0:
+            chk("constants non-empty", True, f"{counts['constants']} rows")
+        else:
+            checks.append(("constants non-empty", "n/a", "this codebase defines none"))
 
         # ZERO ANNOTATIONS MEANS TWO VERY DIFFERENT THINGS. If the KB file is THERE and the index
         # still came back empty, that is the disaster this check exists for: the annotation file is
