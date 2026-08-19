@@ -307,6 +307,9 @@ def main() -> int:
     p.add_argument("--dead-first", action="store_true",
                    help="killed hypotheses first -- what has already been tested and disproved is "
                         "the most reusable thing here")
+    p.add_argument("--since", default="",
+                   help="only claims dated on or after this (YYYY-MM-DD) -- what a session "
+                        "concluded, without reading a handover to find out")
     p.add_argument("--limit", type=int, default=80)
 
     p = sub.add_parser("param")
@@ -514,6 +517,9 @@ def main() -> int:
             WHERE (:t = '' OR text LIKE :frag OR entry LIKE :frag)
               AND (:st = '' OR status = :st)
               AND (:ev = '' OR evidence = :ev)
+              -- string compare is correct for ISO dates. A claim with NO date is EXCLUDED rather
+              -- than treated as ancient: undated means unknown, not old.
+              AND (:since = '' OR (dated <> '' AND dated >= :since))
             ORDER BY CASE status WHEN 'dead' THEN :deadrank
                                  WHEN 'open' THEN 1 WHEN 'live' THEN 2 ELSE 3 END,
                      CASE evidence WHEN 'measured' THEN 0 WHEN 'reported' THEN 1 ELSE 2 END,
@@ -521,7 +527,7 @@ def main() -> int:
             LIMIT :lim
             """,
             {"t": args.term, "frag": f"%{args.term}%", "st": args.status.lower(),
-             "ev": args.evidence.lower(), "lim": args.limit + 1,
+             "ev": args.evidence.lower(), "since": args.since, "lim": args.limit + 1,
              "deadrank": 0 if args.dead_first else 9},
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)

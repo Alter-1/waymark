@@ -1434,7 +1434,13 @@ def insert_annotation(con: sqlite3.Connection, name: str, kind: str, item: dict)
         con.execute(
             "INSERT INTO claims(entry, kind, text, evidence, status, dated, killed_by)"
             " VALUES(?,?,?,?,?,?,?)",
-            (name, kind, text, cev, cst, str(claim.get("date") or ""),
+            # ACCEPT EITHER SPELLING. The column is `dated` and the documented authoring key is
+            # `date`, which is exactly the kind of near-miss that gets typed the other way --
+            # and this repository's own sample KB did, losing every claim date SILENTLY. No
+            # error, no warning, just a blank column nobody looks at until they want to know
+            # when something was established.
+            (name, kind, text, cev, cst,
+             str(claim.get("date") or claim.get("dated") or ""),
              str(claim.get("killed_by") or "")),
         )
 

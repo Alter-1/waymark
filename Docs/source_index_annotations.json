@@ -122,28 +122,28 @@
     {
      "status": "dead",
      "evidence": "measured",
-     "dated": "2026-03-02",
      "text": "The lost writes are caused by WAL_SYNC_BATCH not flushing before the segment swap, so setting WAL_SYNC_ALWAYS should fix it.",
-     "killed_by": "reproduced with WAL_SYNC_ALWAYS at 8x the write cost: identical growth and identical lost writes. The policy was never involved."
+     "killed_by": "reproduced with WAL_SYNC_ALWAYS at 8x the write cost: identical growth and identical lost writes. The policy was never involved.",
+     "date": "2026-03-02"
     },
     {
      "status": "dead",
      "evidence": "inferred",
-     "dated": "2026-03-05",
      "text": "STORE_MAX_KEYS is being hit, so put() silently refuses and the write is lost.",
-     "killed_by": "put() returns false on refusal and the client logs it; the reproduction shows put() returning true for records that later vanish."
+     "killed_by": "put() returns false on refusal and the client logs it; the reproduction shows put() returning true for records that later vanish.",
+     "date": "2026-03-05"
     },
     {
      "status": "live",
      "evidence": "measured",
-     "dated": "2026-03-11",
-     "text": "Compaction copies records written after it started: with writers paused, a compaction that had run for 40 minutes converged in under a second."
+     "text": "Compaction copies records written after it started: with writers paused, a compaction that had run for 40 minutes converged in under a second.",
+     "date": "2026-03-11"
     },
     {
      "status": "open",
      "evidence": "inferred",
-     "dated": "2026-03-11",
-     "text": "Whether a compaction interrupted by SIGKILL can leave a half-swapped segment that replay accepts. NEVER REPRODUCED -- inferred safe from rename() being atomic on the target filesystem, which is an assumption, not a measurement. Settle it with a kill -9 loop under sustained writes."
+     "text": "Whether a compaction interrupted by SIGKILL can leave a half-swapped segment that replay accepts. NEVER REPRODUCED -- inferred safe from rename() being atomic on the target filesystem, which is an assumption, not a measurement. Settle it with a kill -9 loop under sustained writes.",
+     "date": "2026-03-11"
     }
    ],
    "see_also": [
@@ -224,8 +224,8 @@
     {
      "status": "open",
      "evidence": "inferred",
-     "dated": "2026-08-18",
-     "text": "Under sustained load flush_pending() never runs, so WAL_SYNC_BATCH's exposure is bounded by WAL_SEGMENT_SIZE rather than by the idle interval. Inferred from the call sites only -- never measured."
+     "text": "Under sustained load flush_pending() never runs, so WAL_SYNC_BATCH's exposure is bounded by WAL_SEGMENT_SIZE rather than by the idle interval. Inferred from the call sites only -- never measured.",
+     "date": "2026-08-18"
     }
    ],
    "see_also": [

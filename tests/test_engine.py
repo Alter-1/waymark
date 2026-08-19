@@ -78,6 +78,16 @@ def main():
     rc, out, _ = query("broken-links")
     check("no broken links in the sample", "No matches" in out, out.strip()[:120])
 
+    # ---- claim dates: the silent-loss trap ---------------------------------
+    rc, out, _ = query("claim")
+    check("sample claims carry their dates", out.count("dated:") >= 4, out[:200])
+    check("a claim date is not silently dropped", "2026-03-02" in out,
+          "the column is `dated` and the documented key is `date`; both must be accepted")
+    rc, recent, _ = query("claim", "--since", "2026-08-01")
+    rc, older, _ = query("claim", "--since", "2026-01-01")
+    check("--since filters by date", 0 < recent.count("status:") < older.count("status:"),
+          f"since-Aug={recent.count('status:')} since-Jan={older.count('status:')}")
+
     # ---- resolver: the two fixes of 2026-08-18 ------------------------------
     db = TOOLS / f"code_index.{_branch()}.sqlite"
     if not db.exists():
