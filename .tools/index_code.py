@@ -1724,18 +1724,10 @@ def load_params(con: sqlite3.Connection) -> None:
 
 
 def load_annotations(con: sqlite3.Connection, path: Path) -> None:
-    # A MISSING KB FILE IS REPORTED, NEVER SWALLOWED. This used to `return` in silence, and the
-    # result was the worst failure a knowledge base can have: `index_code.py` finished normally,
-    # said nothing, and produced an index with ZERO notes -- so every later query answered "no
-    # matches" and looked like an empty topic rather than a broken build. Reported from a Windows
-    # host, where a mis-resolved path is easy to produce and the outcome was silently losing the
-    # notes on every rebuild.
-    # Not an exception: an ordinary repository with no KB file at all is a legitimate case, and the
-    # engine must still index its source. So say it loudly and carry on.
+    # Absent is not reported HERE: this function cannot tell a KB the project ASKED for from the
+    # generic default in a repository that simply has no KB. The caller knows which it is and warns
+    # there -- see the note at the load loop.
     if not path.exists():
-        print(f"KB annotations NOT FOUND: {path}\n"
-              f"  the index will be built WITHOUT any notes -- check `annotations` in "
-              f"kb.config.json, and that the path exists", file=sys.stderr)
         return
     data = json.loads(path.read_text(encoding="utf-8"))
     label = data.get("branch") or data.get("version") or path.name
@@ -1907,7 +1899,19 @@ def main() -> int:
         scan_definitions(con, path, read_text(path))
     scan_refs(con, files)
     load_params(con)
+    # A CONFIGURED KB THAT IS MISSING MUST BE REPORTED. Silence here was the worst failure a
+    # knowledge base can have: the build finished normally, printed its usual counts, and produced
+    # an index with ZERO notes -- after which every query answered "no matches", which reads as an
+    # empty topic rather than a broken build. Reported from a Windows host, where a mis-resolved
+    # path is easy to produce and the notes vanished on every rebuild.
+    # ONLY WHEN IT WAS ASKED FOR, though. A repository with no kb.config.json and no KB file is an
+    # ordinary repository, and an engine that shouts at it is an engine nobody runs twice.
+    kb_was_requested = bool(PROJECT.get("annotations")) or bool(args.annotations)
     for annotation_path in annotation_paths:
+        if kb_was_requested and not annotation_path.exists():
+            print(f"KB annotations NOT FOUND: {annotation_path}\n"
+                  f"  the index is being built WITHOUT any notes -- check `annotations` in "
+                  f"kb.config.json, and that the file exists", file=sys.stderr)
         load_annotations(con, annotation_path)
     # After BOTH symbols and annotations exist: the link needs each side.
     link_annotations_to_symbols(con)

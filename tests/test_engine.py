@@ -111,6 +111,61 @@ def main():
     check("a missing target resolves to nothing", c == [])
     con.close()
 
+    # ---- a CONFIGURED KB that is missing must be reported, not swallowed ----
+    # Reported from a Windows host: a mis-resolved path made the notes vanish and nothing said so.
+    # The build finished normally, printed its usual counts, and produced an index with ZERO notes,
+    # after which every query answered "no matches" -- which reads as an empty topic rather than a
+    # broken build. That is the worst failure a knowledge base can have, because it looks like an
+    # answer.
+    with tempfile.TemporaryDirectory() as tdm:
+        miss = Path(tdm)
+        (miss / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (miss / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (miss / "src").mkdir()
+        (miss / "src" / "thing.c").write_text("int thing(void) { return 1; }\n", encoding="utf-8")
+        (miss / "kb.config.json").write_text(
+            json.dumps({"annotations": "Docs/does_not_exist.json", "roots": ["src"]}), encoding="utf-8")
+
+        rc, out, err = run([str(miss / ".tools" / "index_code.py")], cwd=miss)
+        check("missing KB: the build still succeeds", rc == 0, err.strip()[-200:])
+        check("missing KB: it is REPORTED, not swallowed", "NOT FOUND" in err, err.strip()[-200:])
+        check("missing KB: the message names the path",
+              "does_not_exist.json" in err, err.strip()[-200:])
+        mstats = json.loads(out) if out.strip().startswith("{") else {}
+        check("missing KB: the index really is noteless (so the warning is warranted)",
+              mstats.get("concepts", 0) == 0, f"concepts={mstats.get('concepts')}")
+
+    # ---- ...but an ordinary repo with no KB at all stays QUIET ---------------
+    # The counterpart to the check above, and the reason the warning lives at the call site rather
+    # than inside load_annotations(): only the caller knows whether the KB was ASKED for. An engine
+    # that shouts at every repository without a KB is an engine nobody runs twice.
+    with tempfile.TemporaryDirectory() as tdq:
+        quiet = Path(tdq)
+        (quiet / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (quiet / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (quiet / "src").mkdir()
+        (quiet / "src" / "q.c").write_text("int q(void) { return 0; }\n", encoding="utf-8")
+
+        rc, _, err = run([str(quiet / ".tools" / "index_code.py")], cwd=quiet)
+        check("no KB configured: the engine stays quiet about it", rc == 0 and "NOT FOUND" not in err,
+              err.strip()[-200:])
+
+    # ---- a path typed with the native separator still resolves ---------------
+    # Paths are STORED posix (Path.as_posix()); a caller on Windows types Docs\file.h, and before
+    # native_path_term() the LIKE comparison matched nothing at all -- indistinguishable from
+    # "that file is not indexed".
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("wm_query_pathterm", str(TOOLS / "query_code_index.py"))
+    _q = _ilu.module_from_spec(_spec)
+    sys.modules["wm_query_pathterm"] = _q
+    _spec.loader.exec_module(_q)
+    check("native path separators are translated for lookup",
+          _q.native_path_term(r"Docs\a\b.h") == "Docs/a/b.h", _q.native_path_term(r"Docs\a\b.h"))
+    check("posix paths are left alone",
+          _q.native_path_term("Docs/a/b.h") == "Docs/a/b.h", _q.native_path_term("Docs/a/b.h"))
+
     # ---- a foreign repo: generic defaults, no config, no KB -----------------
     with tempfile.TemporaryDirectory() as td:
         far = Path(td)
