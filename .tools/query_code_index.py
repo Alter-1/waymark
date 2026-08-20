@@ -280,6 +280,17 @@ def print_symbol_rows_across_branches(
     print_rows(rows[:limit], as_json, brief, more_available=len(rows) > limit, limit=limit, query_text=name)
 
 
+def native_path_term(term: str) -> str:
+    """Make a path argument match what the index stores.
+
+    The index stores repo-relative paths via Path.as_posix(), i.e. always with forward slashes.
+    A caller on Windows types them the way the OS shows them, with backslashes, and the LIKE
+    comparison then matched nothing at all -- indistinguishable from "not indexed". Translating
+    here keeps every stored path in one canonical form instead of storing both.
+    """
+    return term.replace("\\", "/")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Query source index.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite DB path")
@@ -723,7 +734,10 @@ def main() -> int:
             )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)
     elif args.cmd == "file":
-        term = f"%{args.term}%"
+        # PATHS ARE STORED POSIX, SO ACCEPT EITHER SEPARATOR. index_code.py normalises with
+        # Path.as_posix() when it stores, but a Windows user naturally types Docs\\file.h -- and a
+        # backslash matched nothing, silently, looking like "that file is not indexed".
+        term = f"%{native_path_term(args.term)}%"
         cur = con.execute(
             "SELECT path AS file, module, ext, size FROM files WHERE path LIKE ? ORDER BY path LIMIT ?",
             (term, args.limit + 1),

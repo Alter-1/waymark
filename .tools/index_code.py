@@ -1724,7 +1724,18 @@ def load_params(con: sqlite3.Connection) -> None:
 
 
 def load_annotations(con: sqlite3.Connection, path: Path) -> None:
+    # A MISSING KB FILE IS REPORTED, NEVER SWALLOWED. This used to `return` in silence, and the
+    # result was the worst failure a knowledge base can have: `index_code.py` finished normally,
+    # said nothing, and produced an index with ZERO notes -- so every later query answered "no
+    # matches" and looked like an empty topic rather than a broken build. Reported from a Windows
+    # host, where a mis-resolved path is easy to produce and the outcome was silently losing the
+    # notes on every rebuild.
+    # Not an exception: an ordinary repository with no KB file at all is a legitimate case, and the
+    # engine must still index its source. So say it loudly and carry on.
     if not path.exists():
+        print(f"KB annotations NOT FOUND: {path}\n"
+              f"  the index will be built WITHOUT any notes -- check `annotations` in "
+              f"kb.config.json, and that the path exists", file=sys.stderr)
         return
     data = json.loads(path.read_text(encoding="utf-8"))
     label = data.get("branch") or data.get("version") or path.name
