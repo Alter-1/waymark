@@ -124,6 +124,54 @@ def brief_value(value: object) -> str:
     return out
 
 
+# THE HEADLINE IS WHAT GETS READ, AND IT CAN OUTLIVE THE ENTRY UNDER IT.
+# Two incidents in a single day (2026-08-21) had exactly this shape: a one-line summary said one
+# thing, the body under it said the opposite, and the summary is what got acted on.
+#     "AT+R stays silent-reset"          -- the note itself said: bare AT+R is a FACTORY RESET
+#     "...fix (2.1 done, 2.0 pending)"   -- the body said: PORTED TO ALL 3 BRANCHES, bench-validated
+# The first one cost a bench device its entire configuration. Neither entry was WRONG; both were
+# right underneath and stale on top. A lint would not have helped, because nobody runs a lint at
+# the moment they are reading an answer -- so the warning belongs HERE, in the reader.
+#
+# ONLY THE VERDICT POSITION IS TESTED: the opening of the brief, where an entry states what it
+# concluded. The rest of a brief legitimately narrates history ("...was believed fixed until..."),
+# and matching there flagged entries whose brief literally opened with "OPEN LEAD". Anchored, a
+# real 206-entry KB flags exactly one -- and that one is a genuine disagreement. A check that cries
+# wolf on a healthy KB is worse than no check at all.
+_VERDICT_HEAD = 160
+_VERDICT_DONE = re.compile(r"^\W*(RESOLVED|FIXED|SOLVED|CLOSED|DONE)\b", re.I)
+_VERDICT_OPEN = re.compile(r"^\W*(STILL\s+OPEN|OPEN|PENDING|UNRESOLVED|NOT\s+FIXED|TODO)\b", re.I)
+
+
+def verdict_conflict(row: dict) -> str:
+    """Does this entry's headline disagree with its own status? Returns the warning, or "".
+
+    Deliberately NOT a judgement about which one is right: a mixed state is legitimate (a fix that
+    landed while its bench re-test is still outstanding is honestly both). The point is to say so
+    at the moment somebody is about to act on the headline alone.
+    """
+    value = row.get("value")
+    if isinstance(value, (str, bytes)):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return ""
+    if not isinstance(value, dict):
+        return ""
+    status = str(value.get("status") or "").strip().lower()
+    brief = str(value.get("brief") or "").strip()[:_VERDICT_HEAD]
+    if not status or not brief:
+        return ""
+    for state, pattern in (("open", _VERDICT_DONE), ("resolved", _VERDICT_OPEN)):
+        if status != state:
+            continue
+        found = pattern.search(brief)
+        if found:
+            return (f"status={state}, but the brief opens by calling it "
+                    f"{found.group(1).upper()} -- read the notes, not the headline")
+    return ""
+
+
 def print_rows(
     rows: list[dict],
     as_json: bool,
@@ -132,6 +180,9 @@ def print_rows(
     limit: int | None = None,
     query_text: str = "",
 ) -> None:
+    # Machine consumers get the same warning as a field -- an agent reading --json would otherwise
+    # be the one reader that never sees it, and agents are most of the traffic here.
+    rows = [dict(r, verdict_conflict=c) if (c := verdict_conflict(r)) else r for r in rows]
     if as_json:
         if limit is not None:
             print(json.dumps(
@@ -159,8 +210,12 @@ def print_rows(
                     loc += f":{row['line']}"
             head = " ".join(str(row.get(k, "")) for k in ("name", "kind", "marker", "symbol", "table") if row.get(k))
             print(f"{head} {loc}".strip())
+            # Immediately under the name, before the value it contradicts -- a warning printed
+            # after 40 lines of notes is a warning read after the decision was made.
+            if row.get("verdict_conflict"):
+                print(f"  !! {row['verdict_conflict']}")
             for key, value in row.items():
-                if key in {"name", "kind", "marker", "symbol", "file", "line"} or value in {"", None, "[]"}:
+                if key in {"name", "kind", "marker", "symbol", "file", "line", "verdict_conflict"} or value in {"", None, "[]"}:
                     continue
                 if not brief:
                     print(f"  {key}: {value}")
@@ -487,6 +542,25 @@ def main() -> int:
         broken = con.execute("SELECT count(*) FROM kb_links WHERE status IN "
                              "('missing','ambiguous')").fetchone()[0]
         chk("kb links resolve", broken == 0, f"{broken} unresolved (see broken-links)")
+
+        # A HEADLINE THAT DISAGREES WITH ITS OWN ENTRY -- reported, never failed. verdict_conflict()
+        # explains the two incidents behind it. This is a READING LIST, not a verdict: a mixed state
+        # is legitimate (a fix that has landed while its bench re-test is still outstanding is
+        # honestly both), so failing here would leave a healthy KB permanently red, and a check that
+        # is always red is a check nobody reads. The reader prints the same warning inline, which is
+        # where it actually catches somebody.
+        conflicts = []
+        try:
+            for _name, _value in con.execute("SELECT name, value FROM annotations"):
+                if verdict_conflict({"value": _value}):
+                    conflicts.append(_name)
+        except Exception:
+            conflicts = []
+        if conflicts:
+            checks.append(("headline agrees with status", "REVIEW",
+                           f"{len(conflicts)} to re-read: " + ", ".join(sorted(conflicts)[:4])))
+        else:
+            chk("headline agrees with status", True, "no entry contradicts its own status")
 
         unstated = con.execute("SELECT count(*) FROM claims WHERE evidence = 'unstated'").fetchone()[0]
         chk("claims carry provenance", unstated == 0, f"{unstated} without evidence")

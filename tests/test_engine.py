@@ -207,6 +207,65 @@ def main():
         check("foreign repo: the empty KB is reported n/a, not a problem",
               re.search(r"annotations non-empty[\s\S]{0,40}n/a", out) is not None, out.strip()[-200:])
 
+
+    # A HEADLINE THAT OUTLIVED ITS ENTRY. Two incidents on 2026-08-21 had this exact shape: the
+    # one-line summary said one thing, the body under it said the opposite, and the summary is what
+    # got acted on -- once at the cost of a bench device's entire configuration. The engine now says
+    # so IN THE READER, because nobody runs a lint at the moment they are reading an answer.
+    with tempfile.TemporaryDirectory() as td3:
+        rep = Path(td3)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int f(void) { return 1; }\n", encoding="utf-8")
+        (rep / "Docs").mkdir()
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "Docs/source_index_annotations.json"}), encoding="utf-8")
+        (rep / "Docs" / "source_index_annotations.json").write_text(json.dumps({
+            "schema": 2, "scope": "shared", "features": [
+                {"name": "stale-headline", "kind": "feature", "status": "open",
+                 "keywords": ["fixture"],
+                 "brief": "RESOLVED in build 12 by deferring the reinit.",
+                 "notes": "The fix landed, but the bench re-test has never been run."},
+                {"name": "honest-headline", "kind": "feature", "status": "open",
+                 "keywords": ["fixture"],
+                 "brief": "OPEN: the reinit still runs on the wrong task.",
+                 "notes": "Not started."},
+                # The anchoring guarantee: a brief may NARRATE a history it has moved past. Matching
+                # anywhere in the text flagged entries whose brief opened with the word OPEN.
+                {"name": "narrated-history", "kind": "feature", "status": "open",
+                 "keywords": ["fixture"],
+                 "brief": "A latch that silences a port. This was believed FIXED in build 9 and is not.",
+                 "notes": "Still under investigation."},
+            ]}), encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+
+        rc, out, _ = query("annotation", "stale-headline", cwd=rep)
+        check("a headline that contradicts its own status is flagged IN THE READER",
+              "read the notes, not the headline" in out, out.strip()[:200])
+        check("the flag names both sides of the disagreement",
+              "status=open" in out and "RESOLVED" in out, out.strip()[:200])
+
+        rc, out, _ = query("annotation", "honest-headline", cwd=rep)
+        check("an entry whose headline agrees with its status is left alone",
+              "read the notes, not the headline" not in out, out.strip()[:200])
+
+        rc, out, _ = query("annotation", "narrated-history", cwd=rep)
+        check("a brief that merely NARRATES a past verdict is not flagged",
+              "read the notes, not the headline" not in out, out.strip()[:200])
+
+        rc, out, _ = query("--json", "annotation", "stale-headline", cwd=rep)
+        payload = json.loads(out)
+        got = payload["rows"] if isinstance(payload, dict) else payload
+        check("--json carries the same warning as a field",
+              any("verdict_conflict" in r for r in got), out.strip()[:200])
+
+        rc, out, _ = query("selftest", cwd=rep)
+        check("selftest REPORTS the disagreement", "headline agrees with status" in out, out.strip()[-300:])
+        check("selftest does NOT fail for it -- a mixed state can be legitimate",
+              rc == 0, f"rc={rc}\n" + out.strip()[-300:])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

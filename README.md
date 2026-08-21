@@ -119,6 +119,25 @@ missing annotation file and is silently EMPTY, a `see_also` pointing at somethin
 exists, a claim with no provenance so an inference reads like a measurement. It exits non-zero, so
 it belongs in a pre-commit hook or CI.
 
+### When the headline outlives the entry
+
+The most-read part of an entry is its one-line `brief`, and that is the part most likely to go
+stale: the body gets corrected when the facts change, the summary above it does not. Waymark
+compares the verdict an entry OPENS with against its own `status` and says so **in the reader**:
+
+```
+$ query_code_index.py annotation wifi-apply-freeze
+wifi-apply-freeze feature
+  !! status=open, but the brief opens by calling it RESOLVED -- read the notes, not the headline
+```
+
+It is deliberately not a verdict about which side is right — a mixed state is legitimate, and a fix
+that has landed while its bench re-test is still outstanding is honestly both. It is a warning
+placed where somebody is about to act on the headline alone. `selftest` lists the same entries as
+`REVIEW` and does **not** fail for them, because a check that is permanently red is a check nobody
+reads. Only the opening of the brief is examined; a brief that narrates a history it has moved past
+("this was believed FIXED in build 9 and is not") is left alone.
+
 ## Handing work to the next context
 
 Waymark keeps durable facts queryable; a handover records current working state. Use both when a
