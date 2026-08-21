@@ -24,3 +24,21 @@ jobs:
 
       - name: Check the engine
         run: python3 tests/test_engine.py
+
+  # THE ENGINE MUST STILL PARSE ON THE OLDEST HOST IT IS RUN ON. A ':=' shipped and 3.7 stopped
+  # parsing query_code_index.py at import -- which takes out every query and selftest with them, so
+  # the KB answers nothing rather than answering with one field missing. The job above runs on
+  # whatever python3 ubuntu-latest ships, so it could never have caught that.
+  # SYNTAX ONLY, deliberately: the point is that the file parses, not that 3.7 can run the suite.
+  # ubuntu-22.04 because setup-python no longer offers 3.7 on 24.04.
+  oldest-python:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.7"
+
+      - name: Parse the engine under Python 3.7
+        run: python -m compileall -q .tools tests

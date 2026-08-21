@@ -145,6 +145,18 @@ session stops mid-investigation: put facts and dead hypotheses into the KB first
 `selftest`, then write a short handover with repo state, hardware/runtime state, what is proven, and
 the next concrete action. See `HANDOVER.md`.
 
+## What it needs
+
+Python **3.7** or newer, standard library only. No third-party packages, and nothing to install.
+
+3.7 is not a guess: the engine is run on a work host with Python 3.7.8 and a SQLite built without
+the JSON1 extension, and both of those have already broken it once. Where SQLite lacks JSON1 the
+`notes` query registers a small pure-Python `json_extract` and carries on. Where the interpreter is
+3.7, syntax is the thing that bites — a `:=` does not degrade one query, it stops the module
+parsing and takes every query with it, `selftest` included. CI parses the tree under a real 3.7 for
+that reason, and the test suite refuses 3.8+ syntax on whatever machine you are working on, which
+is where a syntax error is cheap to fix.
+
 ## Using it on your own project
 
 Copy `.tools/` into your repository and write a `kb.config.json` at the root:

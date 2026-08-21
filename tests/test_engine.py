@@ -19,6 +19,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# The oldest interpreter the engine is actually run on -- a Windows work host on
+# 3.7.8 / SQLite 3.31.1. Raise this only when that host does.
+PY_FLOOR_STR = "3.7"
 TOOLS = ROOT / ".tools"
 FAILED = []
 
@@ -361,6 +364,37 @@ def main():
           f"json1={_has_json1}: " + out.strip()[-200:])
     check("notes returns content, not an empty result standing in for an error",
           "wal_append" in out, out.strip()[-200:])
+
+
+    # ---- the engine must still PARSE on the oldest host that runs it ----------
+    # A ':=' shipped in print_rows() and the engine stopped parsing on a 3.7 host. That is worse
+    # than any missing feature: a SyntaxError at import time takes out EVERY query and selftest with
+    # them, so the KB answers nothing at all rather than answering with one field absent. It got
+    # through because the author checked the interpreter in front of them (3.8) instead of the
+    # oldest one the engine is run on, and nothing in the repo stated which that was.
+    #
+    # ast.parse(feature_version=(3,7)) does NOT reject the walrus -- measured -- so the grammar
+    # cannot simply be asked. These are the 3.8+ node types themselves. CI parses the tree under a
+    # real 3.7 as well; this check is here so it fails on the machine that made the change, before
+    # a push, which is the only place a syntax error is cheap.
+    import ast as _ast
+    too_new = []
+    for src in sorted(list(TOOLS.glob("*.py")) + list((ROOT / "tests").glob("*.py"))):
+        try:
+            tree = _ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+        except SyntaxError as exc:
+            too_new.append(f"{src.name}: does not parse here at all -- {exc.msg}")
+            continue
+        for node in _ast.walk(tree):
+            if node.__class__.__name__ == "NamedExpr":            # ':=' , 3.8
+                too_new.append(f"{src.name}:{node.lineno}: ':=' is 3.8+")
+            elif isinstance(node, _ast.arguments) and getattr(node, "posonlyargs", []):
+                too_new.append(f"{src.name}: positional-only parameters are 3.8+")
+            elif node.__class__.__name__ in {"Match", "TryStar"}:  # 3.10 / 3.11
+                too_new.append(f"{src.name}:{getattr(node, 'lineno', '?')}: "
+                               f"{node.__class__.__name__} is 3.10+")
+    check(f"the engine parses under Python {PY_FLOOR_STR}, the oldest host it runs on",
+          not too_new, "; ".join(too_new[:4]))
 
     print()
     if FAILED:
