@@ -1099,11 +1099,19 @@ def link_commits(con: sqlite3.Connection) -> int:
 def link_annotations_to_symbols(con: sqlite3.Connection) -> int:
     """Fill symbol_annotations: which notes constrain which symbol.
 
-    Two ways a note reaches a symbol, and they are kept distinct because they are worth different
-    amounts. DECLARED means the entry names the symbol in its symbols[] list -- deliberate, curated.
-    MENTIONED means the symbol's name appears in the entry's own text, which is how the useful ones
-    were actually written: dump-drop-policy names queue_packet() in prose and nothing pointed at it
-    from the function.
+    Three ways a note reaches a symbol, kept distinct because they are worth different amounts.
+    DECLARED means the entry names the symbol deliberately: either in its symbols[] list, or by
+    BEING named after it -- an entry called "wal_append" is about wal_append, and that is the most
+    direct statement of intent in the file. MENTIONED means the symbol's name appears in the entry's
+    own text, which is how the useful ones were actually written: dump-drop-policy names
+    queue_packet() in prose and nothing pointed at it from the function.
+
+    The name was not read here until 210826, and the omission was invisible because it only bit
+    entries whose prose does NOT repeat their own name. Notes written about a function usually say
+    the function's name somewhere, so they linked by MENTION and looked fine; a short note
+    ("Opens the widget.") linked to nothing and `notes <Symbol>` answered "No matches" for an entry
+    keyed on exactly that symbol. An empty answer reads as "nothing recorded", which is the one
+    failure a knowledge base must not have.
     """
     # HOW MANY PLACES DEFINE THIS NAME, and where. A bare-name link is only trustworthy when the
     # name is distinctive: a name like `main` can have dozens of definitions in one tree AND be a
@@ -1130,6 +1138,12 @@ def link_annotations_to_symbols(con: sqlite3.Connection) -> int:
         except Exception:
             continue
         seen: dict[str, str] = {}
+        # The entry's OWN name, when it is the name of something indexed. Intersecting with `names`
+        # is what keeps this honest: a concept titled "Primary protocol channel" matches no symbol
+        # and links to nothing, so only entries genuinely keyed on a symbol gain a link.
+        own = str(item.get("name", "")).strip()
+        if own in names:
+            seen[own] = "declared"
         for declared in item.get("symbols", []) or []:
             token = str(declared).strip()
             if token:
