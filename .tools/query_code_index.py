@@ -12,6 +12,43 @@ import sys
 from pathlib import Path
 
 
+def _ensure_json_functions(con: sqlite3.Connection) -> None:
+    """Register a json_extract() fallback when SQLite was built without JSON1.
+
+    _AT_ 200826 19:05  The `notes` subcommand is the only query that calls json_extract, and it
+    died with "no such function: json_extract" on this toolchain: the build Python here is 3.7.8
+    with SQLite 3.31.1 and no JSON1 extension. Notes were still being WRITTEN to
+    Docs/symbol_notes.json and folded into the index, so nothing was lost - but they could never
+    be read back, which quietly removes the recall half of "record findings to the KB".
+    Only $.key paths are used, so a small pure-Python extractor is enough.
+    """
+    try:
+        con.execute("SELECT json_extract('{\"a\":1}', '$.a')").fetchone()
+        return
+    except sqlite3.OperationalError:
+        pass
+
+    def json_extract(doc, path):
+        if doc is None or not path or not path.startswith("$"):
+            return None
+        try:
+            cur = json.loads(doc)
+        except (TypeError, ValueError):
+            return None
+        for part in [p for p in path[1:].split(".") if p]:
+            if isinstance(cur, dict):
+                cur = cur.get(part)
+            elif isinstance(cur, list) and part.isdigit():
+                cur = cur[int(part)] if int(part) < len(cur) else None
+            else:
+                return None
+            if cur is None:
+                return None
+        return cur if isinstance(cur, str) else json.dumps(cur, ensure_ascii=False)
+
+    con.create_function("json_extract", 2, json_extract)
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BRIEF_VALUE_LINES = 4
 BRIEF_VALUE_CHARS = 500
@@ -220,6 +257,7 @@ def fetch_symbol_rows_from_db(
             "note": f"Index DB not found: {db_path}",
         }]
     con = sqlite3.connect(db_path)
+    _ensure_json_functions(con)
     # SUBSTRING MATCH, like every other subcommand. The bare name was passed straight to LIKE, so
     # this was an EXACT match -- and since member definitions are indexed by their qualified name,
     # `symbol write_sync` could never find BaseSerial::write_sync.
@@ -420,6 +458,7 @@ def main() -> int:
         print("Run: python3 .tools/index_code.py", file=sys.stderr)
         return 2
     con = sqlite3.connect(db_path)
+    _ensure_json_functions(con)
 
     if args.cmd == "summary":
         rows = []
