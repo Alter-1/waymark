@@ -219,7 +219,16 @@ def print_rows(
 ) -> None:
     # Machine consumers get the same warning as a field -- an agent reading --json would otherwise
     # be the one reader that never sees it, and agents are most of the traffic here.
-    rows = [dict(r, verdict_conflict=c) if (c := verdict_conflict(r)) else r for r in rows]
+    #
+    # Spelled without ':=' on purpose. The walrus is 3.8+, and this engine is run on a 3.7 host --
+    # the same one the json_extract fallback exists for. A SyntaxError is worse than a missing
+    # feature: it takes out every query, including selftest, so the KB reports nothing rather than
+    # reporting less.
+    def _with_conflict(row):
+        conflict = verdict_conflict(row)
+        return dict(row, verdict_conflict=conflict) if conflict else row
+
+    rows = [_with_conflict(r) for r in rows]
     if as_json:
         if limit is not None:
             print(json.dumps(
