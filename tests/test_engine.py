@@ -207,6 +207,91 @@ def main():
         check("foreign repo: the empty KB is reported n/a, not a problem",
               re.search(r"annotations non-empty[\s\S]{0,40}n/a", out) is not None, out.strip()[-200:])
 
+
+    # ---- the write half: a note reaches the file the engine actually reads ---
+    # Recording a fact used to mean hand-editing the annotation JSON, and the two ways that went
+    # wrong were both SILENT: a `note` subcommand that has never existed (argparse rejects it, and
+    # the error reads as "the KB refused this"), and a note written to a path nothing indexes -
+    # neither the write nor the reindex complains, and the fact is simply gone.
+    with tempfile.TemporaryDirectory() as tdn:
+        note = Path(tdn)
+        (note / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py", "add_note.py"):
+            (note / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (note / "src").mkdir()
+        (note / "src" / "widget.c").write_text(
+            "int widget_open(void) { return 0; }\n", encoding="utf-8")
+        (note / "kb").mkdir()
+        (note / "kb" / "ann.json").write_text(
+            json.dumps({"schema": 2, "symbols": []}), encoding="utf-8")
+        (note / "kb.config.json").write_text(
+            json.dumps({"annotations": "kb/ann.json", "roots": ["src"]}), encoding="utf-8")
+
+        add = str(note / ".tools" / "add_note.py")
+        rc, out, err = run([add, "widget_open", "Opens the widget.",
+                            "--keywords", "widget, open", "--author", "T"], cwd=note)
+        check("add_note writes without error", rc == 0, err.strip()[-200:])
+
+        ann = json.loads((note / "kb" / "ann.json").read_text(encoding="utf-8"))
+        syms = ann.get("symbols", [])
+        check("the note lands in the CONFIGURED file, not the default path", len(syms) == 1,
+              f"symbols={len(syms)}")
+        check("keywords are stored as a list, not a prefix in the prose",
+              syms and syms[0].get("keywords") == ["widget", "open"],
+              str(syms[0].get("keywords") if syms else None))
+
+        # The annotation file quotes symbol names, so an unfiltered `git grep` points the note at
+        # the KB rather than at the code that it constrains.
+        check("the guessed file is source, never the annotation file",
+              not (syms and (syms[0].get("file") or "").endswith(".json")),
+              str(syms[0].get("file") if syms else None))
+
+        # Appending is the default: one symbol can carry several findings from several sessions.
+        run([add, "widget_open", "A second, later finding.", "--author", "T"], cwd=note)
+        ann = json.loads((note / "kb" / "ann.json").read_text(encoding="utf-8"))
+        check("a second note APPENDS rather than overwriting",
+              len(ann.get("symbols", [])) == 2, f"symbols={len(ann.get('symbols', []))}")
+
+        run([add, "widget_open", "The corrected finding.", "--author", "T", "--replace"], cwd=note)
+        ann = json.loads((note / "kb" / "ann.json").read_text(encoding="utf-8"))
+        kept = [x.get("notes") for x in ann.get("symbols", [])]
+        check("--replace supersedes that author's earlier notes",
+              kept == ["The corrected finding."], str(kept))
+
+        # ...and the whole point: the note comes BACK out of a freshly built index.
+        # Note that NONE of the prose above repeats the string "widget_open" - that is deliberate.
+        # The linker used to reach a symbol only through symbols[] or a MENTION in the text, never
+        # through the entry's own name, so an entry keyed on widget_open linked to nothing and this
+        # query answered "No matches" - indistinguishable from "nothing was ever recorded".
+        run([str(note / ".tools" / "index_code.py")], cwd=note)
+        rc, out, _ = query("notes", "widget_open", cwd=note)
+        check("the recorded note is readable again after a reindex",
+              rc == 0 and "corrected finding" in out, out.strip()[-200:])
+        check("being NAMED after a symbol is a declared link, not a guess",
+              "declared" in out, out.strip()[-200:])
+
+        rc, _, err = run([add, "widget_open", "x", "--annotations",
+                          str(note / "kb" / "nope.json")], cwd=note)
+        check("a missing annotation file is refused, not created blindly",
+              rc != 0 and "nope.json" in err, err.strip()[-200:])
+
+    # ---- `notes` must work where SQLite was built without JSON1 --------------
+    # json_extract is used by exactly one query, and where the extension is absent that query died
+    # with "no such function". Notes were still written and still indexed, so nothing was lost -
+    # they just could never be read back, which removes the recall half of "record what you learn"
+    # without removing anything visible. Measured on Python 3.7.8 with SQLite 3.31.1.
+    import sqlite3 as _sqlite3
+    _has_json1 = True
+    try:
+        _sqlite3.connect(":memory:").execute("SELECT json_extract('{\"a\":1}', '$.a')")
+    except _sqlite3.OperationalError:
+        _has_json1 = False
+    rc, out, _ = query("notes", "wal_append")
+    check("notes answers regardless of JSON1 in the host SQLite", rc == 0,
+          f"json1={_has_json1}: " + out.strip()[-200:])
+    check("notes returns content, not an empty result standing in for an error",
+          "wal_append" in out, out.strip()[-200:])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
