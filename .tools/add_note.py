@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -108,11 +109,31 @@ def main() -> int:
         entry["author"] = a.author
     entry["ts"] = datetime.now().strftime("%d%m%y %H:%M")
     syms.append(entry)
-    syms.sort(key=lambda s: (s.get("name") or "", s.get("ts") or ""))
+    # BY NAME ONLY, and lean on the sort being STABLE. Sorting on ts as well reads as chronological
+    # and is not: ts is DDMMYY, so "010926" sorts before "210826" while being three weeks later.
+    # Stable + append order gives the real chronology within a name for free.
+    syms.sort(key=lambda s: s.get("name") or "")
 
-    with io.open(str(path), "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(doc, fh, indent=1, ensure_ascii=False)
-        fh.write("\n")
+    # WRITE ASIDE, THEN RENAME. This file is the only irreplaceable thing in a waymark repo -- the
+    # SQLite index is rebuilt from it and the backups in .tools/kb-backups are only taken on
+    # REBUILD, not here. Opening the real path with "w" truncates it before a single byte is
+    # written, so any failure between that and the last line of json.dump leaves the whole KB
+    # destroyed with no copy newer than the last index build. os.replace is atomic on POSIX and on
+    # Windows within a volume, which is where this tool came from.
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with io.open(str(tmp), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(doc, fh, indent=1, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(str(tmp), str(path))
+    except Exception:
+        # Leave the original untouched, and do not leave a half-written file lying next to it
+        # looking like a KB.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
     print("noted %s%s (%d symbol annotations)"
           % (a.symbol, " -> " + where if where else "", len(syms)))

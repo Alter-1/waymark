@@ -332,6 +332,19 @@ def main():
         check("a missing annotation file is refused, not created blindly",
               rc != 0 and "nope.json" in err, err.strip()[-200:])
 
+        # THE ANNOTATION FILE IS THE ONLY IRREPLACEABLE THING IN A WAYMARK REPO, and the backups in
+        # .tools/kb-backups are taken on REBUILD, not on write. Opening the real path with "w"
+        # truncates it before a byte is written, so any failure mid-dump would leave the whole KB
+        # destroyed with no copy newer than the last index build. The write goes aside and renames,
+        # and must not leave the aside file behind looking like a second KB.
+        kb_file = note / "kb" / "ann.json"
+        check("the annotation file is still valid JSON after every write",
+              isinstance(json.loads(kb_file.read_text(encoding="utf-8")), dict),
+              kb_file.read_text(encoding="utf-8")[:120])
+        check("no half-written .tmp is left beside the KB",
+              not list(kb_file.parent.glob("*.tmp")),
+              str([f.name for f in kb_file.parent.glob("*.tmp")]))
+
     # ---- `notes` must work where SQLite was built without JSON1 --------------
     # json_extract is used by exactly one query, and where the extension is absent that query died
     # with "no such function". Notes were still written and still indexed, so nothing was lost -
