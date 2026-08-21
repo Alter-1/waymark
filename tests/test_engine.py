@@ -44,6 +44,17 @@ def query(*args, cwd=ROOT):
     return run([str(Path(cwd) / ".tools" / "query_code_index.py")] + list(args), cwd=cwd)
 
 
+def sqlite3_scratch():
+    """A throwaway DB: scan_definitions writes rows we do not want, we only want its lexed lines."""
+    import sqlite3
+    con = sqlite3.connect(":memory:")
+    con.executescript("".join(
+        f"CREATE TABLE IF NOT EXISTS {t}(a,b,c,d,e,f,g,h,i,j);"
+        for t in ("symbols", "symbol_comments", "architecture_comments", "constants",
+                  "api_markers", "files", "refs")))
+    return con
+
+
 def resolver(cwd, db):
     """Import the engine and ask the resolver directly -- the CLI cannot show ambiguity."""
     import importlib.util
@@ -365,6 +376,33 @@ def main():
     check("notes returns content, not an empty result standing in for an error",
           "wal_append" in out, out.strip()[-200:])
 
+
+    # ---- lexing once per file must produce the SAME index as lexing twice ----
+    # Lexing was 65% of a build and every file was lexed TWICE: once by scan_definitions and once by
+    # scan_refs, which cannot be fused with it because it needs the complete symbol table first.
+    # scan_definitions now hands its stripped lines forward. That is a pure speed change and must
+    # stay one -- an optimisation that quietly indexes LESS is far worse than a slow build, because
+    # the missing references look exactly like references that were never written.
+    mod2, con2 = resolver(ROOT, db)
+    files2 = [ROOT / r[0] for r in con2.execute("SELECT path FROM files ORDER BY path")]
+    before = con2.execute("SELECT count(*) FROM refs").fetchone()[0]
+    con2.execute("DELETE FROM refs")
+    mod2.scan_refs(con2, files2)                       # lexes for itself, the old way
+    without = con2.execute("SELECT count(*) FROM refs").fetchone()[0]
+    handed = {}
+    for f in files2:
+        try:
+            mod2.scan_definitions(sqlite3_scratch(), f, mod2.read_text(f), handed)
+        except Exception:
+            pass                                        # only the side effect on `handed` matters
+    con2.execute("DELETE FROM refs")
+    mod2.scan_refs(con2, files2, handed)                # reusing the handed-forward lines
+    with_cache = con2.execute("SELECT count(*) FROM refs").fetchone()[0]
+    con2.rollback()
+    check("reusing the lexed lines indexes exactly the same refs",
+          without == with_cache and with_cache > 0, f"{without} without vs {with_cache} with")
+    check("and that matches what the real build recorded", before == with_cache,
+          f"build={before} recomputed={with_cache}")
 
     # ---- the engine must still PARSE on the oldest host that runs it ----------
     # A ':=' shipped in print_rows() and the engine stopped parsing on a 3.7 host. That is worse

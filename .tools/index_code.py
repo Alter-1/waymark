@@ -956,10 +956,21 @@ def scan_definition_line(
             insert_symbol(con, name, "js_function", rpath, lineno, stripped[:240], comment, commented_out)
 
 
-def scan_definitions(con: sqlite3.Connection, path: Path, text: str) -> None:
+def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
+                     lexed_lines: dict | None = None) -> None:
+    """Index the definitions in one file.
+
+    lexed_lines, when given, receives this file's stripped code lines. LEXING IS 65% OF A BUILD and
+    every file used to be lexed TWICE -- once here and once in scan_refs, which cannot be fused with
+    this pass because it needs the complete symbol table first. Handing the lines forward removes
+    the second lex without changing what either pass computes. Optional so both functions still work
+    standalone.
+    """
     rpath = rel(path)
     ext = path.suffix.lower()
     lexed = lex_source(text, ext)
+    if lexed_lines is not None:
+        lexed_lines[rpath] = lexed.code_lines
     ranges = comment_ranges(lexed)
     attached_ranges: set[int] = set()
     scan_architecture_comments(con, path, ranges)
@@ -994,7 +1005,8 @@ def enclosing_symbol_map(con: sqlite3.Connection, rpath: str) -> list[tuple[int,
     ]
 
 
-def scan_refs(con: sqlite3.Connection, files: list[Path]) -> None:
+def scan_refs(con: sqlite3.Connection, files: list[Path],
+              lexed_lines: dict | None = None) -> None:
     # BOTH FORMS OF A QUALIFIED NAME. Symbols are now indexed as Class::method, but every CALL SITE
     # writes the bare method -- so matching only the qualified form finds no references to a member
     # function at all. That is a regression the qualified-name change introduced and this undoes:
@@ -1012,7 +1024,10 @@ def scan_refs(con: sqlite3.Connection, files: list[Path]) -> None:
         return
     for path in files:
         rpath = rel(path)
-        lexed = lex_source(read_text(path), path.suffix.lower())
+        # Already lexed by scan_definitions in the same run -- see the note there.
+        code_lines = None if lexed_lines is None else lexed_lines.get(rpath)
+        if code_lines is None:
+            code_lines = lex_source(read_text(path), path.suffix.lower()).code_lines
         # WHO the caller is, not just where the line is. A bare file:line answers "is it referenced";
         # the enclosing function answers "who does this". Twice in one session the enclosing function
         # WAS the finding: send_udp_dbg_log() turned out to be called from custom_log() when its
@@ -1026,7 +1041,7 @@ def scan_refs(con: sqlite3.Connection, files: list[Path]) -> None:
         defs = [] if path.suffix.lower() in (".h", ".hpp") else enclosing_symbol_map(con, rpath)
         di = 0
         cur_sym = ""
-        for lineno, line in enumerate(lexed.code_lines, 1):
+        for lineno, line in enumerate(code_lines, 1):
             while di < len(defs) and defs[di][0] <= lineno:
                 cur_sym = defs[di][1]
                 di += 1
@@ -1908,10 +1923,11 @@ def main() -> int:
         return 0
 
     init_db(con)
+    lexed_lines: dict = {}
     for path in files:
         insert_file(con, path)
-        scan_definitions(con, path, read_text(path))
-    scan_refs(con, files)
+        scan_definitions(con, path, read_text(path), lexed_lines)
+    scan_refs(con, files, lexed_lines)
     load_params(con)
     # A CONFIGURED KB THAT IS MISSING MUST BE REPORTED. Silence here was the worst failure a
     # knowledge base can have: the build finished normally, printed its usual counts, and produced
