@@ -57,7 +57,7 @@ SKIP_DIRS = {
     "build", "dist", "Production", "Archive",
 }
 MAX_FILE_BYTES = 2_000_000
-INDEX_SCHEMA_VERSION = "5"
+INDEX_SCHEMA_VERSION = "6"
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
@@ -209,39 +209,129 @@ def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_diges
         return False
 
 
-def init_db(con: sqlite3.Connection) -> None:
+# WHAT AN INCREMENTAL BUILD MAY KEEP, and what it must always redo.
+# SCANNED_TABLES hold one row per thing found IN A FILE, so they can be invalidated file by file --
+# that is the whole saving. KB_TABLES are derived from the annotation file rather than from source
+# and are rebuilt from scratch every run: measured at 0.14 s on a 678-file tree, which is far below
+# the cost of reasoning about whether they are stale.
+# NOT LISTED, DELIBERATELY: symbol_lifecycle, branch_symbols and symbol_metadata carry history and
+# hand-written notes that no build may throw away.
+SCANNED_TABLES = ("symbols", "symbol_comments", "architecture_comments",
+                  "refs", "constants", "api_markers")
+KB_TABLES = ("annotations", "claims", "concepts", "params", "routes", "kb_links",
+             "symbol_annotations", "commit_links", "branch_overrides")
+
+DISPOSABLE_TABLES_DROP_SQL = """
+DROP TABLE IF EXISTS files;
+DROP TABLE IF EXISTS symbols;
+DROP TABLE IF EXISTS symbol_comments;
+DROP TABLE IF EXISTS architecture_comments;
+DROP TABLE IF EXISTS refs;
+DROP TABLE IF EXISTS constants;
+DROP TABLE IF EXISTS api_markers;
+DROP TABLE IF EXISTS routes;
+DROP TABLE IF EXISTS concepts;
+DROP TABLE IF EXISTS params;
+DROP TABLE IF EXISTS branch_overrides;
+DROP TABLE IF EXISTS kb_links;
+DROP TABLE IF EXISTS annotations;
+DROP TABLE IF EXISTS claims;
+DROP TABLE IF EXISTS symbol_annotations;
+DROP TABLE IF EXISTS commit_links;
+DROP TABLE IF EXISTS meta;
+"""
+
+
+def stored_file_state(con: sqlite3.Connection) -> dict:
+    """path -> (size, mtime_ns), as the previous build recorded it."""
+    try:
+        return {r[0]: (r[1], r[2]) for r in con.execute("SELECT path, size, mtime_ns FROM files")}
+    except sqlite3.Error:
+        return {}
+
+
+def plan_incremental(con: sqlite3.Connection, files: list) -> tuple | None:
+    """(rescan, gone) for an incremental build, or None if this one has to be done in full.
+
+    None whenever the previous index cannot be trusted to be complete: a different schema, or no
+    file rows at all. Everything else is a straight size+mtime comparison per file.
+    """
+    # A BRAND-NEW DATABASE HAS NO meta TABLE AT ALL, and meta_value() raises rather than returning
+    # None -- which crashed the FIRST build in every fresh repository. index_is_fresh() guards its
+    # own call for exactly this reason; this one has to as well.
+    try:
+        if meta_value(con, "index_schema") != INDEX_SCHEMA_VERSION:
+            return None
+    except sqlite3.Error:
+        return None
+    stored = stored_file_state(con)
+    if not stored:
+        return None
+    current = {}
+    for path in files:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        current[rel(path)] = (st.st_size, st.st_mtime_ns)
+    rescan = sorted(p for p, v in current.items() if stored.get(p) != v)
+    gone = sorted(p for p in stored if p not in current)
+    return rescan, gone
+
+
+def forget_files(con: sqlite3.Connection, rel_paths: list) -> None:
+    """Drop every scanned row belonging to these files, so they can be re-scanned from clean."""
+    for start in range(0, len(rel_paths), 400):      # SQLite caps host parameters per statement
+        chunk = rel_paths[start:start + 400]
+        marks = ",".join("?" * len(chunk))
+        con.execute(f"DELETE FROM files WHERE path IN ({marks})", chunk)
+        for table in SCANNED_TABLES:
+            con.execute(f"DELETE FROM {table} WHERE file IN ({marks})", chunk)
+
+
+def symbol_name_digest(con: sqlite3.Connection) -> str:
+    """Digest of the exact name set scan_refs matches against.
+
+    THE ONE THING THAT MAKES INCREMENTAL REFS UNSAFE. scan_refs looks for tokens from the COMPLETE
+    symbols+constants table in every file, so a symbol added in file B means references to it in an
+    UNCHANGED file A were never recorded. Re-scanning only the changed files would leave those out,
+    and a missing reference is indistinguishable from one that was never written. So: if this
+    digest moved, refs are redone for every file; if it did not, only the changed files need it.
+    """
+    rows = con.execute("SELECT name FROM symbols UNION SELECT name FROM constants ORDER BY name")
+    return digest_state([r[0] for r in rows])
+
+
+def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
+    """Create the schema. wipe=False keeps whatever rows are already there.
+
+    An INCREMENTAL build re-scans only the files that changed, so the disposable tables must
+    survive: the rows for unchanged files ARE the saving. Every CREATE here is IF NOT EXISTS for
+    that reason, and the DROPs are a separate step the caller asks for. The persistent tables
+    (symbol_lifecycle, symbol_metadata, branch_symbols) were already IF NOT EXISTS -- they carry
+    history no build may throw away.
+    """
+    if wipe:
+        con.executescript(DISPOSABLE_TABLES_DROP_SQL)
     con.executescript(
         """
-        DROP TABLE IF EXISTS files;
-        DROP TABLE IF EXISTS symbols;
-        DROP TABLE IF EXISTS symbol_comments;
-        DROP TABLE IF EXISTS architecture_comments;
-        DROP TABLE IF EXISTS refs;
-        DROP TABLE IF EXISTS constants;
-        DROP TABLE IF EXISTS api_markers;
-        DROP TABLE IF EXISTS routes;
-        DROP TABLE IF EXISTS concepts;
-        DROP TABLE IF EXISTS params;
-        DROP TABLE IF EXISTS branch_overrides;
-        DROP TABLE IF EXISTS kb_links;
-        DROP TABLE IF EXISTS annotations;
-        DROP TABLE IF EXISTS claims;
         -- symbol_annotations is DERIVED and rebuilt every run, so it belongs with the volatile
         -- tables. Creating it without dropping it made the whole executescript fail on the SECOND
         -- build with "table already exists" -- AFTER the drops above had run, leaving an index with
         -- zero files, symbols and refs. Silent, because the traceback went to a suppressed stderr.
-        DROP TABLE IF EXISTS symbol_annotations;
-        DROP TABLE IF EXISTS commit_links;
-        DROP TABLE IF EXISTS meta;
 
-        CREATE TABLE files(
+        CREATE TABLE IF NOT EXISTS files(
             id INTEGER PRIMARY KEY,
             path TEXT UNIQUE NOT NULL,
             ext TEXT NOT NULL,
             module TEXT NOT NULL,
-            size INTEGER NOT NULL
+            size INTEGER NOT NULL,
+            -- size+mtime is what an incremental build compares to decide "unchanged". Same pair
+            -- git uses in its index, and it inherits the same caveat: a checkout can restore an
+            -- old mtime. --force is the answer to that, not a slower default.
+            mtime_ns INTEGER NOT NULL DEFAULT 0
         );
-        CREATE TABLE symbols(
+        CREATE TABLE IF NOT EXISTS symbols(
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -250,35 +340,35 @@ def init_db(con: sqlite3.Connection) -> None:
             signature TEXT NOT NULL,
             commented_out INTEGER NOT NULL DEFAULT 0
         );
-        CREATE INDEX symbols_name_idx ON symbols(name);
+        CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name);
 
-        CREATE TABLE symbol_comments(
+        CREATE TABLE IF NOT EXISTS symbol_comments(
             symbol TEXT NOT NULL,
             kind TEXT NOT NULL,
             file TEXT NOT NULL,
             line INTEGER NOT NULL,
             comment TEXT NOT NULL
         );
-        CREATE INDEX symbol_comments_symbol_idx ON symbol_comments(symbol);
+        CREATE INDEX IF NOT EXISTS symbol_comments_symbol_idx ON symbol_comments(symbol);
 
-        CREATE TABLE architecture_comments(
+        CREATE TABLE IF NOT EXISTS architecture_comments(
             title TEXT NOT NULL,
             file TEXT NOT NULL,
             line INTEGER NOT NULL,
             comment TEXT NOT NULL
         );
-        CREATE INDEX architecture_comments_title_idx ON architecture_comments(title);
+        CREATE INDEX IF NOT EXISTS architecture_comments_title_idx ON architecture_comments(title);
 
-        CREATE TABLE refs(
+        CREATE TABLE IF NOT EXISTS refs(
             symbol TEXT NOT NULL,
             file TEXT NOT NULL,
             line INTEGER NOT NULL,
             in_symbol TEXT NOT NULL DEFAULT '',
             context TEXT NOT NULL
         );
-        CREATE INDEX refs_symbol_idx ON refs(symbol);
+        CREATE INDEX IF NOT EXISTS refs_symbol_idx ON refs(symbol);
 
-        CREATE TABLE constants(
+        CREATE TABLE IF NOT EXISTS constants(
             name TEXT NOT NULL,
             value TEXT NOT NULL,
             file TEXT NOT NULL,
@@ -286,12 +376,12 @@ def init_db(con: sqlite3.Connection) -> None:
             category TEXT NOT NULL,
             commented_out INTEGER NOT NULL DEFAULT 0
         );
-        CREATE INDEX constants_name_idx ON constants(name);
+        CREATE INDEX IF NOT EXISTS constants_name_idx ON constants(name);
 
         -- THE OBSERVABLE SIDE. constants answers "what is ETH2S_PROTO_RAW"; this answers the
         -- question you actually have in front of a device: "the dump says FU=2 / P=*, what is
         -- that?". One row per selectable value, so a value can be looked up directly.
-        CREATE TABLE claims(
+        CREATE TABLE IF NOT EXISTS claims(
             entry TEXT NOT NULL,
             kind TEXT NOT NULL,
             text TEXT NOT NULL,
@@ -300,10 +390,10 @@ def init_db(con: sqlite3.Connection) -> None:
             dated TEXT NOT NULL DEFAULT '',
             killed_by TEXT NOT NULL DEFAULT ''
         );
-        CREATE INDEX claims_entry_idx ON claims(entry);
-        CREATE INDEX claims_status_idx ON claims(status);
+        CREATE INDEX IF NOT EXISTS claims_entry_idx ON claims(entry);
+        CREATE INDEX IF NOT EXISTS claims_status_idx ON claims(status);
 
-        CREATE TABLE params(
+        CREATE TABLE IF NOT EXISTS params(
             target TEXT NOT NULL,
             field TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -314,18 +404,18 @@ def init_db(con: sqlite3.Connection) -> None:
             is_default INTEGER NOT NULL DEFAULT 0,
             source TEXT NOT NULL
         );
-        CREATE INDEX params_field_idx ON params(field);
-        CREATE INDEX params_value_idx ON params(value);
+        CREATE INDEX IF NOT EXISTS params_field_idx ON params(field);
+        CREATE INDEX IF NOT EXISTS params_value_idx ON params(value);
 
-        CREATE TABLE api_markers(
+        CREATE TABLE IF NOT EXISTS api_markers(
             marker TEXT NOT NULL,
             file TEXT NOT NULL,
             line INTEGER NOT NULL,
             context TEXT NOT NULL
         );
-        CREATE INDEX api_marker_idx ON api_markers(marker);
+        CREATE INDEX IF NOT EXISTS api_marker_idx ON api_markers(marker);
 
-        CREATE TABLE routes(
+        CREATE TABLE IF NOT EXISTS routes(
             name TEXT NOT NULL,
             source TEXT NOT NULL,
             destination TEXT NOT NULL,
@@ -334,27 +424,27 @@ def init_db(con: sqlite3.Connection) -> None:
             line INTEGER,
             notes TEXT
         );
-        CREATE INDEX routes_name_idx ON routes(name);
+        CREATE INDEX IF NOT EXISTS routes_name_idx ON routes(name);
 
-        CREATE TABLE concepts(
+        CREATE TABLE IF NOT EXISTS concepts(
             concept_id TEXT NOT NULL,
             name TEXT NOT NULL,
             kind TEXT NOT NULL,
             symbols TEXT NOT NULL,
             value TEXT NOT NULL
         );
-        CREATE INDEX concepts_id_idx ON concepts(concept_id);
-        CREATE INDEX concepts_name_idx ON concepts(name);
+        CREATE INDEX IF NOT EXISTS concepts_id_idx ON concepts(concept_id);
+        CREATE INDEX IF NOT EXISTS concepts_name_idx ON concepts(name);
 
-        CREATE TABLE branch_overrides(
+        CREATE TABLE IF NOT EXISTS branch_overrides(
             branch TEXT NOT NULL,
             name TEXT NOT NULL,
             kind TEXT NOT NULL,
             value TEXT NOT NULL
         );
-        CREATE INDEX branch_overrides_name_idx ON branch_overrides(name);
+        CREATE INDEX IF NOT EXISTS branch_overrides_name_idx ON branch_overrides(name);
 
-        CREATE TABLE kb_links(
+        CREATE TABLE IF NOT EXISTS kb_links(
             source_kind TEXT NOT NULL,
             source_name TEXT NOT NULL,
             target_type TEXT NOT NULL,
@@ -366,23 +456,23 @@ def init_db(con: sqlite3.Connection) -> None:
             line INTEGER,
             note TEXT
         );
-        CREATE INDEX kb_links_source_idx ON kb_links(source_kind, source_name);
-        CREATE INDEX kb_links_target_idx ON kb_links(target_type, target);
-        CREATE INDEX kb_links_status_idx ON kb_links(status);
+        CREATE INDEX IF NOT EXISTS kb_links_source_idx ON kb_links(source_kind, source_name);
+        CREATE INDEX IF NOT EXISTS kb_links_target_idx ON kb_links(target_type, target);
+        CREATE INDEX IF NOT EXISTS kb_links_status_idx ON kb_links(status);
 
-        CREATE TABLE annotations(
+        CREATE TABLE IF NOT EXISTS annotations(
             name TEXT NOT NULL,
             kind TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'n/a',
             evidence TEXT NOT NULL DEFAULT 'unknown',
             value TEXT NOT NULL
         );
-        CREATE INDEX annotations_status_idx ON annotations(status);
+        CREATE INDEX IF NOT EXISTS annotations_status_idx ON annotations(status);
 
         -- WHAT CONSTRAINS THIS SYMBOL. The notes were only reachable by keyword, so editing a
         -- function cold surfaced nothing: dump-drop-policy states the rule queue_packet() must obey
         -- and was findable only by searching "dump". This is the inverse link.
-        CREATE TABLE symbol_annotations(
+        CREATE TABLE IF NOT EXISTS symbol_annotations(
             symbol TEXT NOT NULL,
             annotation TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -392,7 +482,7 @@ def init_db(con: sqlite3.Connection) -> None:
                                         -- mentioned: the name appears in its text
             defs INTEGER NOT NULL DEFAULT 0   -- definitions of this name; >1 means read with care
         );
-        CREATE INDEX symbol_annotations_symbol_idx ON symbol_annotations(symbol);
+        CREATE INDEX IF NOT EXISTS symbol_annotations_symbol_idx ON symbol_annotations(symbol);
 
         -- ONE FIX IS MANY COMMITS, and git cannot say which belong together. A single fix can be
         -- three commits across two branches, or eight across all of them; and from `git log` alone
@@ -400,7 +490,7 @@ def init_db(con: sqlite3.Connection) -> None:
         -- The notes already group them, in prose. This makes that grouping queryable.
         -- `branches` is DERIVED at index time from git, never stored in the KB, so it cannot go
         -- stale when a fix is ported.
-        CREATE TABLE commit_links(
+        CREATE TABLE IF NOT EXISTS commit_links(
             sha TEXT NOT NULL,
             annotation TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -408,10 +498,10 @@ def init_db(con: sqlite3.Connection) -> None:
             subject TEXT NOT NULL,
             branches TEXT NOT NULL
         );
-        CREATE INDEX commit_links_sha_idx ON commit_links(sha);
-        CREATE INDEX commit_links_annotation_idx ON commit_links(annotation);
+        CREATE INDEX IF NOT EXISTS commit_links_sha_idx ON commit_links(sha);
+        CREATE INDEX IF NOT EXISTS commit_links_annotation_idx ON commit_links(annotation);
 
-        CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
         CREATE TABLE IF NOT EXISTS symbol_lifecycle(
             symbol_key TEXT PRIMARY KEY,
@@ -679,8 +769,9 @@ def classify_constant(name: str, value: str) -> str:
 
 def insert_file(con: sqlite3.Connection, path: Path) -> None:
     con.execute(
-        "INSERT INTO files(path, ext, module, size) VALUES(?,?,?,?)",
-        (rel(path), path.suffix.lower(), module_for(path), path.stat().st_size),
+        "INSERT INTO files(path, ext, module, size, mtime_ns) VALUES(?,?,?,?,?)",
+        (rel(path), path.suffix.lower(), module_for(path), path.stat().st_size,
+         path.stat().st_mtime_ns),
     )
 
 
@@ -1922,12 +2013,41 @@ def main() -> int:
         print(json.dumps(stats, indent=2, sort_keys=True))
         return 0
 
-    init_db(con)
+    # INCREMENTAL WHEN IT CAN BE, FULL WHEN IT MUST BE. Lexing and scanning is essentially all of a
+    # build (measured: 19.7 s of 19.7 s on a 678-file tree, with every global pass under 0.2 s), and
+    # almost every rebuild follows an edit to a handful of files. --force always does the lot.
+    plan = None if args.force else plan_incremental(con, files)
+    # BEFORE anything is deleted. Taken after forget_files() this digest always looks changed --
+    # the changed file's own symbols are missing from it -- so every incremental build fell back to
+    # a full refs pass and saved almost nothing. Measured: 9.7 s where it should have been 0.4 s.
+    names_before = symbol_name_digest(con) if plan is not None else ""
+    if plan is None:
+        init_db(con)
+        rescan_paths, gone = None, []
+    else:
+        rescan_paths, gone = plan
+        init_db(con, wipe=False)
+        # The KB half is rebuilt from the annotation file every run regardless -- it is cheap, and
+        # deciding whether a note went stale is not.
+        for table in KB_TABLES:
+            con.execute(f"DELETE FROM {table}")
+        forget_files(con, list(rescan_paths) + list(gone))
+
+    todo = files if plan is None else [f for f in files if rel(f) in set(rescan_paths)]
     lexed_lines: dict = {}
-    for path in files:
+    for path in todo:
         insert_file(con, path)
         scan_definitions(con, path, read_text(path), lexed_lines)
-    scan_refs(con, files, lexed_lines)
+
+    # Refs for everything when the name set moved (or on a full build), otherwise only for the files
+    # that changed -- see symbol_name_digest().
+    if plan is None or symbol_name_digest(con) != names_before:
+        con.execute("DELETE FROM refs")
+        scan_refs(con, files, lexed_lines)
+        refs_scope = "all"
+    else:
+        scan_refs(con, todo, lexed_lines)
+        refs_scope = "changed"
     load_params(con)
     # A CONFIGURED KB THAT IS MISSING MUST BE REPORTED. Silence here was the worst failure a
     # knowledge base can have: the build finished normally, printed its usual counts, and produced
@@ -1952,19 +2072,29 @@ def main() -> int:
     if not full_scan:
         print(f"partial scan ({' '.join(args.roots)}): lifecycle deletions skipped", file=sys.stderr)
     update_symbol_lifecycle(con, branch, build_started_at, full_scan)
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("root", str(REPO_ROOT)))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("branch", branch))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("build_started_at", build_started_at))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("file_count", str(len(files))))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("fw_version", detect_fw_version() or ""))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("annotations", ",".join(str(p) for p in annotation_paths)))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("index_schema", INDEX_SCHEMA_VERSION))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("source_digest", source_digest))
-    con.execute("INSERT INTO meta(key, value) VALUES(?, ?)", ("annotation_digest", annotation_digest))
+    # OR REPLACE: meta has a PRIMARY KEY and, unlike the scanned tables, it SURVIVES an
+    # incremental build -- a plain INSERT would hit a UNIQUE constraint on the second run.
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("root", str(REPO_ROOT)))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("branch", branch))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("build_started_at", build_started_at))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("file_count", str(len(files))))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("fw_version", detect_fw_version() or ""))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("annotations", ",".join(str(p) for p in annotation_paths)))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("index_schema", INDEX_SCHEMA_VERSION))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("source_digest", source_digest))
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("annotation_digest", annotation_digest))
     con.commit()
 
     stats = current_stats(con)
     stats["cached"] = False
+    # SAY WHAT THIS BUILD ACTUALLY DID. "full" vs a handful of rescanned files is the difference
+    # between 13 s and 2 s, and if incremental ever silently stops engaging, this is the line that
+    # shows it -- a build that quietly went back to doing everything looks exactly like a slow day.
+    stats["scan"] = "full" if plan is None else "incremental"
+    if plan is not None:
+        stats["rescanned"] = len(todo)
+        stats["dropped"] = len(gone)
+        stats["refs_rescan"] = refs_scope
     if not args.no_json:
         export_json(con, Path(args.json_output), stats)
     print(json.dumps(stats, indent=2, sort_keys=True))

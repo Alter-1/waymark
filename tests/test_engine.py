@@ -377,6 +377,76 @@ def main():
           "wal_append" in out, out.strip()[-200:])
 
 
+    # ---- an incremental build must equal a full one, and must not go stale ----
+    # Re-scanning only what changed is where the time is (13.3 s -> 2.4 s on a 678-file tree), and
+    # it is also where an index quietly starts lying. THE TRAP: scan_refs matches tokens against the
+    # COMPLETE symbol table, so a symbol ADDED in one file means references to it in files that did
+    # NOT change were never recorded. Re-scanning only the changed files leaves those out, and a
+    # missing reference cannot be told apart from one that was never written. The name-set digest is
+    # what closes it; these cases are what prove the digest is doing its job.
+    with tempfile.TemporaryDirectory() as tdi:
+        inc = Path(tdi)
+        (inc / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (inc / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (inc / "src").mkdir()
+        (inc / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        a_c = inc / "src" / "a.c"
+        b_c = inc / "src" / "b.c"
+        a_c.write_text("void alpha(void) { }\n", encoding="utf-8")
+        b_c.write_text("void beta(void) { alpha(); }\n", encoding="utf-8")
+        idx = str(inc / ".tools" / "index_code.py")
+
+        def counts(where=""):
+            import sqlite3 as _s
+            dbp = sorted(inc.glob(".tools/code_index*.sqlite"))[0]
+            con = _s.connect(str(dbp))
+            n_sym = con.execute("SELECT count(*) FROM symbols").fetchone()[0]
+            n_ref = con.execute("SELECT count(*) FROM refs WHERE symbol=?", (where,)).fetchone()[0] if where else 0
+            con.close()
+            return n_sym, n_ref
+
+        run([idx, "--force"], cwd=inc)
+        base_sym, _ = counts()
+
+        # 1. A NEW SYMBOL IN ONE FILE, referenced from a file that did NOT change.
+        a_c.write_text("void alpha(void) { }\nvoid gamma(void) { }\n", encoding="utf-8")
+        b_c.write_text("void beta(void) { alpha(); gamma(); }\n", encoding="utf-8")
+        run([idx, "--force"], cwd=inc)                    # both changed: establish the truth
+        want_sym, want_ref = counts("gamma")
+        # now reach the same state incrementally, touching only a.c after b.c was already indexed
+        a_c.write_text("void alpha(void) { }\n", encoding="utf-8")
+        run([idx, "--force"], cwd=inc)
+        a_c.write_text("void alpha(void) { }\nvoid gamma(void) { }\n", encoding="utf-8")
+        run([idx], cwd=inc)                               # INCREMENTAL: only a.c changed
+        got_sym, got_ref = counts("gamma")
+        check("a symbol added in one file is still found as a ref from an UNCHANGED file",
+              got_ref == want_ref and got_ref > 0, f"want {want_ref} refs to gamma, got {got_ref}")
+        check("and the symbol count matches the full build", got_sym == want_sym,
+              f"want {want_sym}, got {got_sym}")
+
+        # 2. A file that goes away takes its rows with it.
+        b_c.unlink()
+        run([idx], cwd=inc)
+        import sqlite3 as _s3
+        dbp = sorted(inc.glob(".tools/code_index*.sqlite"))[0]
+        con = _s3.connect(str(dbp))
+        left = con.execute("SELECT count(*) FROM symbols WHERE file LIKE '%b.c'").fetchone()[0]
+        lf = con.execute("SELECT count(*) FROM files WHERE path LIKE '%b.c'").fetchone()[0]
+        con.close()
+        check("a deleted file leaves no symbols behind", left == 0, f"{left} stale rows")
+        check("and no file row either", lf == 0, f"{lf} stale file rows")
+
+        # 3. An edited file must not keep its OLD symbols.
+        a_c.write_text("void delta(void) { }\n", encoding="utf-8")
+        run([idx], cwd=inc)
+        con = _s3.connect(str(dbp))
+        old = con.execute("SELECT count(*) FROM symbols WHERE name IN ('alpha','gamma')").fetchone()[0]
+        new = con.execute("SELECT count(*) FROM symbols WHERE name='delta'").fetchone()[0]
+        con.close()
+        check("an edited file's OLD symbols are gone", old == 0, f"{old} stale symbols")
+        check("and its new one is present", new == 1, f"delta rows={new}")
+
     # ---- lexing once per file must produce the SAME index as lexing twice ----
     # Lexing was 65% of a build and every file was lexed TWICE: once by scan_definitions and once by
     # scan_refs, which cannot be fused with it because it needs the complete symbol table first.

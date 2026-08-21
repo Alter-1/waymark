@@ -108,6 +108,31 @@ A link may target `symbol:`, `constant:`, `annotation:`, `concept:`, `route:`, `
   `annotation:compaction` resolves to the entry holding the content instead of complaining that the
   name is ambiguous with its own concept.
 
+## Rebuilding
+
+```bash
+python3 .tools/index_code.py            # re-scans only what changed
+python3 .tools/index_code.py --force    # everything, from scratch
+```
+
+A rebuild re-scans the files whose size or mtime moved, and reuses everything else. On a
+678-file tree (11.6k symbols, 73k refs) that is **13.3 s down to 2.4 s** for an ordinary edit. The
+build says which it did:
+
+```json
+{ "scan": "incremental", "rescanned": 1, "dropped": 0, "refs_rescan": "changed" }
+```
+
+One case costs more, and it is not a bug. References are found by matching tokens against the
+**complete** symbol table, so adding or renaming a symbol means files that did not change may now
+contain references to it. When the symbol name set moves, references are rebuilt for every file
+(`"refs_rescan": "all"`); when it does not, only the changed files are touched. Skipping that would
+leave references missing, and a missing reference is indistinguishable from one that was never
+written — the failure this whole tool exists to avoid.
+
+Size and mtime is the same pair git's index uses, and it inherits the same caveat: a checkout can
+restore an old timestamp. `--force` is the answer to that, rather than making every build slow.
+
 ## Checking the KB itself
 
 ```bash
