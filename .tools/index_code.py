@@ -2138,7 +2138,12 @@ def read_kb_dir(root: Path) -> dict:
     data = json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file() else {}
     collections = data.pop("collections", None)
     if collections is None:
-        collections = sorted(p.name for p in root.iterdir() if p.is_dir())
+        # A DOTTED DIRECTORY IS NOT A COLLECTION. A KB directory is meant to be its OWN git repo --
+        # that is the point of splitting it -- so .git sits directly beside the entry folders, and
+        # "every subdirectory is a collection" turns it into one. Only reached when kb.json is
+        # absent, which is exactly the hand-made case this has to survive.
+        collections = sorted(p.name for p in root.iterdir()
+                             if p.is_dir() and not p.name.startswith("."))
     for name in collections:
         folder = root / name
         items = []
