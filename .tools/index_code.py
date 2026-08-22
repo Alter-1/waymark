@@ -1514,7 +1514,14 @@ def default_annotation_paths() -> list[Path]:
     paths = [DEFAULT_ANNOTATIONS] + list(EXTRA_ANNOTATIONS)
     version = detect_fw_version()
     if version:
-        version_path = DEFAULT_ANNOTATIONS.with_name(f"{BRANCH_ANNOTATION_PREFIX}.{normalize_version(version)}.json")
+        # THE OVERLAY LIVES WITH THE KB, and where that is depends on what the KB IS. Beside the
+        # file when the KB is a file; INSIDE the directory when it is a directory -- otherwise
+        # moving the KB silently orphans its version overlay, and the only symptom is a few
+        # annotations quietly missing from the index. Caught exactly that way: the equivalence
+        # check after the move reported 273 annotations against 270.
+        overlay = f"{BRANCH_ANNOTATION_PREFIX}.{normalize_version(version)}.json"
+        version_path = (DEFAULT_ANNOTATIONS / overlay if DEFAULT_ANNOTATIONS.is_dir()
+                        else DEFAULT_ANNOTATIONS.with_name(overlay))
         if version_path.exists():
             paths.append(version_path)
     return paths
