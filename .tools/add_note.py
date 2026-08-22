@@ -23,10 +23,12 @@ cannot be checked.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import os
 import subprocess
+import time
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +36,46 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_EXTS = (".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino",
                 ".py", ".js", ".html", ".htm", ".css", ".sh", ".cs")
+
+
+@contextlib.contextmanager
+def kb_lock(path: Path, timeout: float = 10.0):
+    """Hold an exclusive claim on the annotation file across read-modify-write.
+
+    THE RENAME MAKES ONE WRITE ATOMIC; IT DOES NOT MAKE TWO WRITES SAFE. Each run reads the whole
+    document, appends to it and writes it back, so two agents recording a finding at the same moment
+    both start from the same copy and the second rename silently discards the first one's note.
+    Nothing is corrupted and nothing complains -- the note is simply gone, which is the failure this
+    tool exists to prevent. Waymark is explicitly for multi-session, multi-agent work, so that race
+    is realistic rather than theoretical.
+
+    O_CREAT|O_EXCL is the lock: atomic on POSIX and on Windows, and needs no dependency. The holder's
+    pid goes inside, so a lock left behind by a killed process can be cleared knowingly rather than
+    guessed at.
+    """
+    lockfile = path.with_name(path.name + ".lock")
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fd = os.open(str(lockfile), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if time.time() >= deadline:
+                raise SystemExit(
+                    "another add_note.py is holding %s\n"
+                    "  if nothing else is running, that lock is stale -- delete it" % lockfile)
+            time.sleep(0.05)
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(fd)
+    try:
+        yield
+    finally:
+        try:
+            lockfile.unlink()
+        except OSError:
+            pass
 
 
 def annotation_path() -> Path:
@@ -86,54 +128,58 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(doc, dict):
-        print("%s is not an annotation document" % path, file=sys.stderr)
-        return 1
-    syms = doc.setdefault("symbols", [])
+    # ONE WRITER AT A TIME, across read AND write -- see kb_lock().
+    with kb_lock(path):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            print("%s is not an annotation document" % path, file=sys.stderr)
+            return 1
+        syms = doc.setdefault("symbols", [])
 
-    if a.replace:
-        before = len(syms)
-        syms[:] = [s for s in syms
-                   if not (s.get("name") == a.symbol and s.get("author", "") == a.author)]
-        if before != len(syms):
-            print("superseded %d earlier note(s)" % (before - len(syms)))
+        if a.replace:
+            before = len(syms)
+            syms[:] = [s for s in syms
+                       if not (s.get("name") == a.symbol and s.get("author", "") == a.author)]
+            if before != len(syms):
+                print("superseded %d earlier note(s)" % (before - len(syms)))
 
-    entry = {"name": a.symbol, "notes": a.note}
-    where = a.file or guess_file(a.symbol)
-    if where:
-        entry["file"] = where
-    if a.keywords:
-        entry["keywords"] = [k.strip() for k in a.keywords.split(",") if k.strip()]
-    if a.author:
-        entry["author"] = a.author
-    entry["ts"] = datetime.now().strftime("%d%m%y %H:%M")
-    syms.append(entry)
-    # BY NAME ONLY, and lean on the sort being STABLE. Sorting on ts as well reads as chronological
-    # and is not: ts is DDMMYY, so "010926" sorts before "210826" while being three weeks later.
-    # Stable + append order gives the real chronology within a name for free.
-    syms.sort(key=lambda s: s.get("name") or "")
+        entry = {"name": a.symbol, "notes": a.note}
+        where = a.file or guess_file(a.symbol)
+        if where:
+            entry["file"] = where
+        if a.keywords:
+            entry["keywords"] = [k.strip() for k in a.keywords.split(",") if k.strip()]
+        if a.author:
+            entry["author"] = a.author
+        entry["ts"] = datetime.now().strftime("%d%m%y %H:%M")
+        syms.append(entry)
+        # BY NAME ONLY, and lean on the sort being STABLE. Sorting on ts as well reads as chronological
+        # and is not: ts is DDMMYY, so "010926" sorts before "210826" while being three weeks later.
+        # Stable + append order gives the real chronology within a name for free.
+        syms.sort(key=lambda s: s.get("name") or "")
 
-    # WRITE ASIDE, THEN RENAME. This file is the only irreplaceable thing in a waymark repo -- the
-    # SQLite index is rebuilt from it and the backups in .tools/kb-backups are only taken on
-    # REBUILD, not here. Opening the real path with "w" truncates it before a single byte is
-    # written, so any failure between that and the last line of json.dump leaves the whole KB
-    # destroyed with no copy newer than the last index build. os.replace is atomic on POSIX and on
-    # Windows within a volume, which is where this tool came from.
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        with io.open(str(tmp), "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(doc, fh, indent=1, ensure_ascii=False)
-            fh.write("\n")
-        os.replace(str(tmp), str(path))
-    except Exception:
-        # Leave the original untouched, and do not leave a half-written file lying next to it
-        # looking like a KB.
+        # WRITE ASIDE, THEN RENAME. This file is the only irreplaceable thing in a waymark repo -- the
+        # SQLite index is rebuilt from it and the backups in .tools/kb-backups are only taken on
+        # REBUILD, not here. Opening the real path with "w" truncates it before a single byte is
+        # written, so any failure between that and the last line of json.dump leaves the whole KB
+        # destroyed with no copy newer than the last index build. os.replace is atomic on POSIX and on
+        # Windows within a volume, which is where this tool came from.
+        # PER PROCESS: a shared scratch name lets two concurrent runs write the same
+        # file and rename each other's half-finished document into place.
+        tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
         try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+            with io.open(str(tmp), "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(doc, fh, indent=1, ensure_ascii=False)
+                fh.write("\n")
+            os.replace(str(tmp), str(path))
+        except Exception:
+            # Leave the original untouched, and do not leave a half-written file lying next to it
+            # looking like a KB.
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     print("noted %s%s (%d symbol annotations)"
           % (a.symbol, " -> " + where if where else "", len(syms)))

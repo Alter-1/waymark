@@ -377,6 +377,56 @@ def main():
           "wal_append" in out, out.strip()[-200:])
 
 
+    # ---- nobody may observe a half-built index, or lose a note to a race ------
+    # Reported from a real session: tests and index_code.py run at the same time, and one query got
+    # "no such table: kb_links". Measured on a 678-file tree, hammering the DB through one full
+    # rebuild: 14 reads crashed, 1143 got an EMPTY table with NO error, 292 were correct. The crash
+    # is the visible 1 %; the other 79 % answered "0 links, 0 broken, 0 annotations" confidently and
+    # wrongly, which would let selftest report a clean pass mid-rebuild.
+    dbp = sorted(TOOLS.glob("code_index*.sqlite"))[0]
+    before_ino = dbp.stat().st_ino
+    run([str(TOOLS / "index_code.py"), "--force"])
+    check("a rebuild REPLACES the index file rather than mutating it in place",
+          dbp.stat().st_ino != before_ino,
+          "inode unchanged -- the build is writing into the live database again")
+    check("and leaves no scratch database behind",
+          not list(TOOLS.glob("code_index*.tmp*")),
+          str([f.name for f in TOOLS.glob("code_index*.tmp*")]))
+
+    # A note must survive other agents writing at the same moment. The rename makes ONE write
+    # atomic; it does nothing about two runs reading the same document and appending to it. Before
+    # the lock, 12 concurrent runs left 2 notes: ten findings gone, nothing corrupted, nothing said.
+    with tempfile.TemporaryDirectory() as tdl:
+        lk = Path(tdl)
+        (lk / ".tools").mkdir(); (lk / "kb").mkdir(); (lk / "src").mkdir()
+        (lk / ".tools" / "add_note.py").write_bytes((TOOLS / "add_note.py").read_bytes())
+        (lk / "src" / "w.c").write_text("void widget_open(void){}\n", encoding="utf-8")
+        (lk / "kb" / "ann.json").write_text(json.dumps({"schema": 2, "symbols": []}), encoding="utf-8")
+        (lk / "kb.config.json").write_text(
+            json.dumps({"annotations": "kb/ann.json", "roots": ["src"]}), encoding="utf-8")
+        add = str(lk / ".tools" / "add_note.py")
+        procs = [subprocess.Popen([sys.executable, add, f"sym{i}", f"finding {i}", "--author", f"A{i}"],
+                                  cwd=str(lk), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                 for i in range(12)]
+        for proc in procs:
+            proc.wait()
+        kept = json.loads((lk / "kb" / "ann.json").read_text(encoding="utf-8"))["symbols"]
+        check("twelve concurrent notes all survive", len(kept) == 12, f"{len(kept)} of 12 kept")
+        check("and no lock or scratch file is left behind",
+              [f.name for f in (lk / "kb").iterdir()] == ["ann.json"],
+              str([f.name for f in (lk / "kb").iterdir()]))
+
+    # An index from an older engine must say so, not raise. Reachable on purpose: the schema has
+    # just gone 5 -> 6, so every index built before that is stale until someone rebuilds.
+    with tempfile.TemporaryDirectory() as tds:
+        old_db = Path(tds) / "old.sqlite"
+        old_db.write_bytes(dbp.read_bytes())
+        import sqlite3 as _sq
+        c = _sq.connect(str(old_db)); c.execute("DROP TABLE kb_links"); c.commit(); c.close()
+        rc, out, err = query("--db", str(old_db), "selftest")
+        check("a stale index is reported as stale, not as a traceback",
+              rc == 2 and "rebuild it" in err and "Traceback" not in err, (err or out).strip()[-200:])
+
     # ---- an incremental build must equal a full one, and must not go stale ----
     # Re-scanning only what changed is where the time is (13.3 s -> 2.4 s on a 678-file tree), and
     # it is also where an index quietly starts lying. THE TRAP: scan_refs matches tokens against the

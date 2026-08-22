@@ -123,6 +123,11 @@ build says which it did:
 { "scan": "incremental", "rescanned": 1, "dropped": 0, "refs_rescan": "changed" }
 ```
 
+The rebuild is **atomic**: it builds into a private file and publishes it with one rename, so a
+concurrent reader sees the old index or the new one and never a half-built one, and an interrupted
+build leaves the previous index in place. Two builds racing each other each produce a complete
+index and the last rename wins — wasted work, never corruption, and no lock required.
+
 One case costs more, and it is not a bug. References are found by matching tokens against the
 **complete** symbol table, so adding or renaming a symbol means files that did not change may now
 contain references to it. When the symbol name set moves, references are rebuilt for every file

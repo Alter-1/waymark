@@ -899,5 +899,26 @@ def main() -> int:
     return 0
 
 
+def run_cli() -> int:
+    """main(), with a stale index reported as such instead of as a traceback.
+
+    An index built by an older engine can be missing a table this one queries -- kb_links did not
+    always exist -- and the bare sqlite3 error ("no such table: kb_links") reads like a bug in the
+    tool rather than an instruction to rebuild. Same shape as the crash the indexer had on a fresh
+    database: an ordinary situation reported as a failure with no next step in it. Schema changes
+    make this reachable on purpose -- the index format has just gone 5 -> 6, so every index built
+    before that is stale until somebody rebuilds it.
+    """
+    try:
+        return main()
+    except sqlite3.OperationalError as exc:
+        message = str(exc)
+        if "no such table" in message or "no such column" in message:
+            print("this index is stale or was built by an older engine: %s\n"
+                  "  rebuild it:  python3 .tools/index_code.py" % message, file=sys.stderr)
+            return 2
+        raise
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli())

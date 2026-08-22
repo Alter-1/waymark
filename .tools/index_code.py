@@ -9,11 +9,13 @@ lookup, not for compiler-grade parsing.
 from __future__ import annotations
 
 import argparse
+import atexit
 import gzip
 import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -2021,6 +2023,48 @@ def main() -> int:
     # the changed file's own symbols are missing from it -- so every incremental build fell back to
     # a full refs pass and saved almost nothing. Measured: 9.7 s where it should have been 0.4 s.
     names_before = symbol_name_digest(con) if plan is not None else ""
+
+    # NOBODY MAY SEE A HALF-BUILT INDEX. The rebuild used to happen in the live database: DROP
+    # TABLE lands immediately (executescript commits before it runs), so for the whole build a
+    # concurrent reader saw the tables EMPTY. Measured on a 678-file tree, hammering the DB with
+    # read-only queries through one full rebuild: 1143 reads got an empty kb_links, 14 got
+    # "no such table", 292 were correct. The crash is the 1 % that is VISIBLE -- the other 79 %
+    # answered "0 links, 0 broken, 0 annotations" with no error at all, which is a confident wrong
+    # answer and would let selftest report a clean pass mid-rebuild.
+    # So: build into a PRIVATE file and publish it with one atomic rename. Per-process name, so two
+    # builds racing each other cannot share a temp file -- each produces a complete index and the
+    # last rename wins. Wasted work, never corruption, and no lock needed for that. It also makes an
+    # interrupted build harmless: Ctrl-C now leaves the previous index in place instead of a
+    # half-built one.
+    # (The incremental path happened to be safe already -- it drops nothing, and its DML commits in
+    #  one transaction -- but only by accident: one executescript added mid-build would silently
+    #  reopen the hole. This makes it correct by construction instead.)
+    real_db = Path(args.db)
+    build_db = real_db.with_name(f"{real_db.name}.{os.getpid()}.tmp")
+    for leftover in (build_db, Path(str(build_db) + "-wal"), Path(str(build_db) + "-shm")):
+        if leftover.exists():
+            leftover.unlink()
+    if plan is not None:
+        # Seed from the current index -- an incremental build's whole saving is the rows it keeps.
+        # Checkpoint first: copying the main file alone would drop anything still in the -wal.
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+        shutil.copy2(real_db, build_db)
+    else:
+        con.close()
+    # A BUILD THAT DIES MUST NOT LEAVE ITS SCRATCH FILE BEHIND -- it is a full-sized copy of the
+    # index, and a directory slowly filling with <db>.<pid>.tmp is its own kind of confusing.
+    # atexit covers the ordinary ways this ends, including Ctrl-C and an unhandled exception; it is
+    # unregistered once the rename has happened and the file is no longer scratch.
+    def _discard_build_db():
+        for leftover in (build_db, Path(str(build_db) + "-wal"), Path(str(build_db) + "-shm")):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+    atexit.register(_discard_build_db)
+    con = connect(build_db)
+
     if plan is None:
         init_db(con)
         rescan_paths, gone = None, []
@@ -2097,6 +2141,12 @@ def main() -> int:
         stats["refs_rescan"] = refs_scope
     if not args.no_json:
         export_json(con, Path(args.json_output), stats)
+    # PUBLISH. Closing checkpoints the WAL and removes the -wal/-shm sidecars, so what gets renamed
+    # is one self-contained file; renaming a live WAL database without them loses committed rows.
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    con.close()
+    os.replace(str(build_db), str(real_db))
+    atexit.unregister(_discard_build_db)
     print(json.dumps(stats, indent=2, sort_keys=True))
     # Say it out loud, on stderr, so a missing or mistyped status cannot pass unnoticed: an entry
     # that silently defaults to n/a drops off the `open` list, which is the one place an unresolved
