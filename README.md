@@ -267,6 +267,10 @@ is where a syntax error is cheap to fix.
 
 ## Using it on your own project
 
+Start here: **[SETUP.md](SETUP.md)** — first-time setup, migrating an existing
+knowledge base to one file per entry, the layout that makes it shareable, and the data-safety
+cautions that go with moving a KB.
+
 Copy `.tools/` into your repository and write a `kb.config.json` at the root:
 
 ```json
