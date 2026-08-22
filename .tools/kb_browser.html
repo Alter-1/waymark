@@ -40,6 +40,7 @@
   .chip { background:#0e1116; border:1px solid var(--line); border-radius:10px;
           padding:1px 8px; font-size:12px; cursor:pointer; }
   .chip:hover { border-color:var(--accent); color:var(--accent); }
+  .ext { color:var(--dim); border-bottom:1px dotted var(--line); cursor:help; }
   a.ref { color:var(--accent); cursor:pointer; text-decoration:underline dotted; }
   details.tree { margin:2px 0 2px 10px; }
   details.tree > summary { cursor:pointer; color:var(--dim); }
@@ -250,8 +251,17 @@ const FIELD_ORDER = ["brief", "notes", "status", "evidence", "min_fw", "kind", "
 
 function linkify(text) {
   // [[name]] is how most references are written; make them behave like the links they are.
-  return esc(text).replace(/\[\[([^\]]{2,120})\]\]/g,
-    (_, t) => `<a class="ref" data-node="${esc(t.replace(/\s+/g, " "))}">${esc(t)}</a>`);
+  // [[ns:name]] points at a store this KB does not own -- a private memory file, a URL. Showing it
+  // as a live link would promise a destination that cannot be opened, so it is marked instead:
+  // visibly a reference, visibly elsewhere.
+  return esc(text).replace(/\[\[([^\]]{2,120})\]\]/g, (_, raw) => {
+    const t = raw.replace(/\s+/g, " ");
+    const m = t.match(/^([a-z][\w-]*):(.+)$/);
+    if (m && !["symbol","constant","annotation","concept","route","comment","file","api"].includes(m[1])) {
+      return `<span class="ext" title="in another store: ${esc(m[1])}">${esc(m[2])}</span>`;
+    }
+    return `<a class="ref" data-node="${esc(t.replace(/^\w+:/, ""))}">${esc(t)}</a>`;
+  });
 }
 
 function chips(values, cmd) {

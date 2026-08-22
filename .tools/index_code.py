@@ -1613,6 +1613,14 @@ def parse_see_also_target(raw: object) -> dict:
         if prefix in {"symbol", "constant", "annotation", "concept", "route", "comment", "file", "api", "arch", "override"}:
             target_type = prefix
             target = rest.strip()
+        elif prefix and " " not in prefix and rest.strip():
+            # A NAMESPACE THIS KB DOES NOT OWN. [[memory:git-never-push-origin]] points at a
+            # private, host-local store; a URL points outside entirely. Neither can be resolved
+            # here, and neither is BROKEN -- reporting them as missing puts permanent false alarms
+            # in front of the real ones, which is how a link report stops being read. They resolve
+            # to `external`: recorded, shown, never counted as rot.
+            target_type = "external"
+            target = target.strip()
     return {
         "target_type": target_type or "auto",
         "target": target,
@@ -1897,9 +1905,13 @@ def validate_kb_links(con: sqlite3.Connection) -> None:
     ).fetchall()
     for rowid, target_type, target, status, note in rows:
         authored = status if status != "unresolved" else ""
-        if authored in {"expired", "renamed"}:
-            resolved_status = authored
+        if target_type == "external":
+            # Nothing to look for: by definition it lives somewhere this index cannot see.
+            resolved_status = "external"
             candidates: list[dict] = []
+        elif authored in {"expired", "renamed"}:
+            resolved_status = authored
+            candidates = []
         else:
             candidates = resolve_link_candidates(con, target_type, target)
             resolved_status = "missing" if not candidates else "ok"

@@ -624,11 +624,15 @@ def main() -> int:
                                  "('missing','ambiguous')").fetchone()[0]
             loose = con.execute("SELECT count(*) FROM kb_links WHERE origin='inline' AND status IN "
                                 "('missing','ambiguous')").fetchone()[0]
+            outside = con.execute("SELECT count(*) FROM kb_links WHERE status='external'").fetchone()[0]
         except sqlite3.Error:
             broken = con.execute("SELECT count(*) FROM kb_links WHERE status IN "
                                  "('missing','ambiguous')").fetchone()[0]
-            loose = 0
+            loose = outside = 0
         chk("kb links resolve", broken == 0, f"{broken} declared links unresolved (see broken-links)")
+        if outside:
+            checks.append(("links to other stores", "n/a",
+                           f"{outside} external -- another knowledge base, not this one"))
         if loose:
             checks.append(("inline [[references]] resolve", "REVIEW",
                            f"{loose} point at nothing here -- forward references, renames, or "
