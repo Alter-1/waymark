@@ -43,6 +43,25 @@
     "crash-recovery",
     "not-an-error"
    ]
+  },
+  {
+   "name": "wal_open",
+   "notes": "Opening the log is Store::open's job and nobody else's. A write path that reaches it opens a SECOND handle to the same segment, and the two append at their own offsets until one silently overwrites the other's records -- which reads as WAL corruption long after the code that caused it ran. The relation below is checked on every build against the call graph, so the rule cannot quietly stop being true.",
+   "keywords": [
+    "wal",
+    "open",
+    "second-handle",
+    "must-not-call-from",
+    "invariant"
+   ],
+   "relations": {
+    "must_not_call_from": [
+     "Store::put"
+    ]
+   },
+   "see_also": [
+    "symbol:wal_replay"
+   ]
   }
  ],
  "symbol_comments": [],

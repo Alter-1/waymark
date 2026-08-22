@@ -498,6 +498,11 @@ def main() -> int:
     p.add_argument("term", nargs="?", default="")
     p.add_argument("--limit", type=int, default=80)
 
+    p = sub.add_parser("relations",
+                       help="declared code relations and whether the tree still supports them")
+    p.add_argument("term", nargs="?", default="", help="symbol, relation or status")
+    p.add_argument("--limit", type=int, default=80)
+
     p = sub.add_parser("broken-links")
     p.add_argument("term", nargs="?", default="")
     p.add_argument("--limit", type=int, default=80)
@@ -609,6 +614,27 @@ def main() -> int:
                            f"{len(conflicts)} to re-read: " + ", ".join(sorted(conflicts)[:4])))
         else:
             chk("headline agrees with status", True, "no entry contradicts its own status")
+
+        # A RELATION THE TREE NO LONGER SUPPORTS IS A DEFECT, not a note: somebody asserted that a
+        # path could not happen and it now can. Reported like a broken link, because it is one --
+        # an authored claim about the code that the code has stopped honouring.
+        # unchecked/unknown-relation are listed but never failed: they mean "nothing is watching
+        # this", which the author needs to KNOW without it blocking every build.
+        try:
+            violated = con.execute(
+                "SELECT count(*) FROM kb_relations WHERE status='VIOLATED'").fetchone()[0]
+            unwatched = con.execute(
+                "SELECT count(*) FROM kb_relations WHERE status IN "
+                "('unchecked','unknown-relation')").fetchone()[0]
+            total = con.execute("SELECT count(*) FROM kb_relations").fetchone()[0]
+        except sqlite3.Error:
+            violated = unwatched = total = 0
+        if total:
+            chk("code relations hold", violated == 0,
+                f"{violated} violated (see: relations)")
+            if unwatched:
+                checks.append(("relations are being checked", "REVIEW",
+                               f"{unwatched} of {total} not verifiable -- nothing is watching them"))
 
         unstated = con.execute("SELECT count(*) FROM claims WHERE evidence = 'unstated'").fetchone()[0]
         chk("claims carry provenance", unstated == 0, f"{unstated} without evidence")
@@ -878,6 +904,20 @@ def main() -> int:
             LIMIT ?
             """,
             (term, term, term, term, term, term, term, term, args.limit + 1),
+        )
+        print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)
+    elif args.cmd == "relations":
+        term = f"%{args.term}%"
+        cur = con.execute(
+            """
+            SELECT source_name AS name, relation, target, status, path, note
+            FROM kb_relations
+            WHERE source_name LIKE ? OR relation LIKE ? OR target LIKE ? OR status LIKE ?
+            ORDER BY CASE status WHEN 'VIOLATED' THEN 0 WHEN 'unknown-relation' THEN 1
+                                 WHEN 'unchecked' THEN 2 ELSE 3 END, source_name, target
+            LIMIT ?
+            """,
+            (term, term, term, term, args.limit + 1),
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)
     elif args.cmd == "broken-links":

@@ -221,6 +221,7 @@ def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_diges
 SCANNED_TABLES = ("symbols", "symbol_comments", "architecture_comments",
                   "refs", "constants", "api_markers")
 KB_TABLES = ("annotations", "claims", "concepts", "params", "routes", "kb_links",
+             "kb_relations",
              "symbol_annotations", "commit_links", "branch_overrides")
 
 DISPOSABLE_TABLES_DROP_SQL = """
@@ -236,6 +237,7 @@ DROP TABLE IF EXISTS concepts;
 DROP TABLE IF EXISTS params;
 DROP TABLE IF EXISTS branch_overrides;
 DROP TABLE IF EXISTS kb_links;
+DROP TABLE IF EXISTS kb_relations;
 DROP TABLE IF EXISTS annotations;
 DROP TABLE IF EXISTS claims;
 DROP TABLE IF EXISTS symbol_annotations;
@@ -445,6 +447,22 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
             value TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS branch_overrides_name_idx ON branch_overrides(name);
+
+        -- RELATIONS THE ENGINE CAN TEST. see_also says two entries are related; a relation asserts
+        -- something about the CODE that a build can go and check. Right now that is
+        -- must_not_call_from: "nothing on this path may reach this symbol". Checked against the
+        -- call graph in refs, so it is instrumentation rather than documentation -- and reported
+        -- exactly like a broken link, because that is what it is: an authored claim the tree no
+        -- longer supports.
+        CREATE TABLE IF NOT EXISTS kb_relations(
+            source_name TEXT NOT NULL,
+            relation TEXT NOT NULL,
+            target TEXT NOT NULL,
+            status TEXT NOT NULL,
+            path TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS kb_relations_status_idx ON kb_relations(status);
 
         CREATE TABLE IF NOT EXISTS kb_links(
             source_kind TEXT NOT NULL,
@@ -1632,6 +1650,94 @@ def insert_links_for_item(con: sqlite3.Connection, source_kind: str, item: dict,
         insert_link(con, source_kind, source_name, raw_target)
 
 
+RELATION_KINDS = ("must_not_call_from",)
+
+
+def insert_relations_for_item(con: sqlite3.Connection, item: dict, fallback: str = "") -> None:
+    """Record any checkable relations an entry declares. Validation happens once, later."""
+    source_name = source_name_for_item(item, fallback)
+    relations = item.get("relations") or {}
+    if not isinstance(relations, dict):
+        return
+    for relation, targets in relations.items():
+        if relation not in RELATION_KINDS:
+            con.execute(
+                "INSERT INTO kb_relations(source_name, relation, target, status, note) "
+                "VALUES(?,?,?,?,?)",
+                (source_name, relation, "", "unknown-relation",
+                 "this engine checks: " + ", ".join(RELATION_KINDS)))
+            continue
+        if isinstance(targets, str):
+            targets = [targets]
+        for target in targets or []:
+            con.execute(
+                "INSERT INTO kb_relations(source_name, relation, target, status) VALUES(?,?,?,?)",
+                (source_name, relation, str(target), "unresolved"))
+
+
+def call_graph(con: sqlite3.Connection) -> dict:
+    """callee -> {callers}, from the refs already indexed.
+
+    APPROXIMATE, AND THE LIMIT MATTERS. refs.in_symbol is the nearest preceding definition, and
+    headers get no attribution at all -- so this graph is good enough to FIND a path that should
+    not exist, and never good enough to prove one does not. Worse, a source-level graph cannot see
+    calls the compiler invents: the flash-in-ISR bug this idea came from went through a GCC
+    $constprop clone and had to be caught by disassembly. So a violation is a finding; silence is
+    not evidence.
+    """
+    graph: dict = {}
+    for callee, caller in con.execute("SELECT symbol, in_symbol FROM refs WHERE in_symbol != ''"):
+        graph.setdefault(callee, set()).add(caller)
+    return graph
+
+
+def find_call_path(graph: dict, target: str, origin: str, max_depth: int = 12) -> list:
+    """Shortest caller chain origin -> ... -> target, or [] if none within max_depth."""
+    if target == origin:
+        return [target]
+    seen = {target}
+    frontier = [(target, [target])]
+    for _ in range(max_depth):
+        nxt = []
+        for node, trail in frontier:
+            for caller in sorted(graph.get(node, ())):
+                if caller in seen:
+                    continue
+                if caller == origin:
+                    return list(reversed(trail + [caller]))
+                seen.add(caller)
+                nxt.append((caller, trail + [caller]))
+        frontier = nxt
+        if not frontier:
+            break
+    return []
+
+
+def validate_kb_relations(con: sqlite3.Connection) -> None:
+    """Test every declared relation against the code, and say which ones could not be tested."""
+    rows = con.execute(
+        "SELECT rowid, source_name, relation, target FROM kb_relations "
+        "WHERE status='unresolved' ORDER BY rowid").fetchall()
+    if not rows:
+        return
+    graph = call_graph(con)
+    known = {r[0] for r in con.execute("SELECT DISTINCT name FROM symbols")}
+    for rowid, source_name, relation, target in rows:
+        # A RELATION NOBODY CHECKED MUST SAY SO. Silently passing an unresolvable name would be the
+        # worst outcome here: the author believes an invariant is enforced and nothing is watching.
+        if source_name not in known or target not in known:
+            missing = source_name if source_name not in known else target
+            con.execute("UPDATE kb_relations SET status=?, note=? WHERE rowid=?",
+                        ("unchecked", "not a known symbol: %s" % missing, rowid))
+            continue
+        path = find_call_path(graph, source_name, target)
+        if path:
+            con.execute("UPDATE kb_relations SET status=?, path=? WHERE rowid=?",
+                        ("VIOLATED", " -> ".join(path), rowid))
+        else:
+            con.execute("UPDATE kb_relations SET status=? WHERE rowid=?", ("ok", rowid))
+
+
 def _concept_of(value: object) -> str:
     """The subject a KB row belongs to, or "" when the row does not name one."""
     try:
@@ -1868,10 +1974,12 @@ def load_annotations(con: sqlite3.Connection, path: Path) -> None:
         )
         insert_annotation(con, item.get("name", item["concept_id"]), "concept", item)
         insert_links_for_item(con, "concept", item)
+        insert_relations_for_item(con, item)
 
     for item in data.get("symbols", []):
         insert_annotation(con, item["name"], "symbol", item)
         insert_links_for_item(con, "symbol", item)
+        insert_relations_for_item(con, item)
     for item in data.get("symbol_comments", []):
         symbol = item.get("symbol") or item["name"]
         comment = item.get("comment") or item.get("notes") or item.get("meaning", "")
@@ -1887,9 +1995,11 @@ def load_annotations(con: sqlite3.Connection, path: Path) -> None:
         )
         insert_annotation(con, symbol, "symbol_comment", item)
         insert_links_for_item(con, "symbol_comment", item, symbol)
+        insert_relations_for_item(con, item, symbol)
     for item in data.get("features", []):
         insert_annotation(con, item["name"], "feature", item)
         insert_links_for_item(con, "feature", item)
+        insert_relations_for_item(con, item)
     for item in data.get("routes", []):
         con.execute(
             "INSERT INTO routes(name, source, destination, protocol, file, line, notes) VALUES(?,?,?,?,?,?,?)",
@@ -1901,6 +2011,7 @@ def load_annotations(con: sqlite3.Connection, path: Path) -> None:
         )
         insert_annotation(con, item["name"], "route", item)
         insert_links_for_item(con, "route", item)
+        insert_relations_for_item(con, item)
     for item in data.get("branch_overrides", []):
         con.execute(
             "INSERT INTO branch_overrides(branch, name, kind, value) VALUES(?,?,?,?)",
@@ -1913,6 +2024,7 @@ def load_annotations(con: sqlite3.Connection, path: Path) -> None:
         )
         insert_annotation(con, item["name"], f"override:{item.get('branch', label)}", item)
         insert_links_for_item(con, f"override:{item.get('branch', label)}", item)
+        insert_relations_for_item(con, item)
 
 
 def query_all(con: sqlite3.Connection, sql: str) -> list[dict]:
@@ -2111,6 +2223,7 @@ def main() -> int:
     link_annotations_to_symbols(con)
     link_commits(con)
     validate_kb_links(con)
+    validate_kb_relations(con)
     # Deleting is only safe when this run covered everything the lifecycle knows about.
     full_scan = sorted(args.roots) == sorted(DEFAULT_ROOTS)
     if not full_scan:

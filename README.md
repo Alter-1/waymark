@@ -138,6 +138,42 @@ written — the failure this whole tool exists to avoid.
 Size and mtime is the same pair git's index uses, and it inherits the same caveat: a checkout can
 restore an old timestamp. `--force` is the answer to that, rather than making every build slow.
 
+## Relations: claims the build can test
+
+`see_also` says two entries are related. A **relation** says something about the code, and every
+build goes and checks it:
+
+```json
+{
+  "name": "wal_open",
+  "notes": "Opening the log is Store::open's job. A write path that reaches it opens a SECOND handle...",
+  "relations": { "must_not_call_from": ["Store::put"] }
+}
+```
+
+```bash
+python3 .tools/query_code_index.py relations
+```
+
+`must_not_call_from` is tested against the call graph already in `refs`, transitively — a violation
+is reported with the chain that causes it (`Store::put -> wal_append`), and `selftest` fails on it,
+because an assertion the code has stopped honouring is a defect and not a note.
+
+**Know what this can and cannot tell you.** A violation is a finding; **silence is not evidence**.
+`refs.in_symbol` is the nearest preceding definition, headers get no attribution, and a source-level
+graph cannot see calls the compiler invents — the bug that motivated this feature reached flash from
+an ISR through a GCC `$constprop` clone and had to be caught by disassembly. So the check catches
+paths that should not exist; it never certifies that none does.
+
+For the same reason the engine is explicit about what it did **not** check. A target that resolves
+to no known symbol is `unchecked`, and a relation kind this engine does not implement is
+`unknown-relation` — both listed by `selftest` without failing it. The one thing worse than an
+unchecked invariant is an unchecked invariant that looks enforced.
+
+Everything else — "writes EEPROM", "restarts WiFi" — belongs in `claims`, with the evidence that
+backs it. Prose about side effects cannot be tested, so it should carry provenance rather than
+sit next to a verified relation looking equally solid.
+
 ## Checking the KB itself
 
 ```bash

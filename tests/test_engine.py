@@ -377,6 +377,64 @@ def main():
           "wal_append" in out, out.strip()[-200:])
 
 
+    # ---- relations: an assertion about the code that the build TESTS ---------
+    # see_also says two entries are related. A relation says something about the CODE, and the
+    # engine goes and checks it -- which is the difference between documentation and
+    # instrumentation. must_not_call_from is the first: "nothing on this path may reach this
+    # symbol", tested against the call graph already in refs.
+    with tempfile.TemporaryDirectory() as tdr:
+        rel = Path(tdr)
+        (rel / ".tools").mkdir(); (rel / "src").mkdir(); (rel / "Docs").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rel / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rel / "src" / "a.c").write_text(
+            "void low(void) { }\n"
+            "void mid(void) { low(); }\n"
+            "void high(void) { mid(); }\n"
+            "void other(void) { }\n", encoding="utf-8")
+        (rel / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "Docs/kb.json"}), encoding="utf-8")
+
+        def write_kb(relations):
+            (rel / "Docs" / "kb.json").write_text(json.dumps(
+                {"schema": 2, "symbols": [{"name": "low", "notes": "n", "relations": relations}]}),
+                encoding="utf-8")
+
+        # holds: `other` cannot reach `low`
+        write_kb({"must_not_call_from": ["other"]})
+        run([str(rel / ".tools" / "index_code.py"), "--force"], cwd=rel)
+        rc, out, _ = query("relations", cwd=rel)
+        check("a relation the code still supports reads ok", "status: ok" in out, out.strip()[:200])
+        rc, _, _ = query("selftest", cwd=rel)
+        check("and selftest passes", rc == 0, f"rc={rc}")
+
+        # violated: high -> mid -> low, two hops away
+        write_kb({"must_not_call_from": ["high"]})
+        run([str(rel / ".tools" / "index_code.py"), "--force"], cwd=rel)
+        rc, out, _ = query("relations", cwd=rel)
+        check("a violated relation is caught THROUGH the call chain, not just directly",
+              "VIOLATED" in out and "high -> mid -> low" in out, out.strip()[:260])
+        rc, sout, serr = query("selftest", cwd=rel)
+        check("and selftest FAILS for it -- it is a defect, not a note",
+              rc != 0 and "code relations hold" in sout, f"rc={rc} " + (serr or sout).strip()[-160:])
+
+        # a target nothing can resolve must SAY it is unchecked, never silently pass
+        write_kb({"must_not_call_from": ["no_such_symbol"]})
+        run([str(rel / ".tools" / "index_code.py"), "--force"], cwd=rel)
+        rc, out, _ = query("relations", cwd=rel)
+        check("an unresolvable target is reported unchecked, not passed",
+              "unchecked" in out and "no_such_symbol" in out, out.strip()[:220])
+        rc, sout, _ = query("selftest", cwd=rel)
+        check("unchecked relations are surfaced but do not fail the build",
+              rc == 0 and "relations are being checked" in sout, f"rc={rc} " + sout.strip()[-160:])
+
+        # a relation kind this engine does not implement must not look enforced
+        write_kb({"must_call_before": ["mid"]})
+        run([str(rel / ".tools" / "index_code.py"), "--force"], cwd=rel)
+        rc, out, _ = query("relations", cwd=rel)
+        check("an unimplemented relation kind says so rather than looking enforced",
+              "unknown-relation" in out and "must_not_call_from" in out, out.strip()[:240])
+
     # ---- nobody may observe a half-built index, or lose a note to a race ------
     # Reported from a real session: tests and index_code.py run at the same time, and one query got
     # "no such table: kb_links". Measured on a 678-file tree, hammering the DB through one full
