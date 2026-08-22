@@ -1,0 +1,207 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>waymark KB browser</title>
+<!--
+  Every search here is the CLI's. The page asks /api/commands what exists and forwards queries to
+  /api/q, which runs query_code_index.py --json. Nothing about the KB is implemented twice: the
+  browser this replaces reimplemented searching in JavaScript over a 40 MB download, offered a
+  fraction of the subcommands, and never learned about new ones.
+-->
+<style>
+  :root { --bg:#12151a; --panel:#1a1f27; --line:#2b323d; --fg:#d7dee8; --dim:#8b96a5;
+          --accent:#6ea8fe; --bad:#e06c75; --warn:#e5c07b; --ok:#98c379; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+           padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line); }
+  select,input,button { background:#0e1116; color:var(--fg); border:1px solid var(--line);
+                        border-radius:4px; padding:6px 8px; font:inherit; }
+  button { cursor:pointer; } button:hover { border-color:var(--accent); }
+  button.on { border-color:var(--accent); color:var(--accent); }
+  #term { flex:1; min-width:220px; }
+  main { display:flex; height:calc(100vh - 53px); }
+  #out { flex:1; overflow:auto; padding:12px 14px; }
+  #side { width:38%; min-width:320px; border-left:1px solid var(--line); overflow:auto;
+          padding:12px 14px; background:#151920; display:none; }
+  .row { border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin-bottom:8px;
+         background:var(--panel); }
+  .row h3 { margin:0 0 4px; font-size:14px; color:var(--accent); }
+  .kv { display:grid; grid-template-columns:150px 1fr; gap:2px 10px; }
+  .kv div:nth-child(odd) { color:var(--dim); }
+  pre { white-space:pre-wrap; word-break:break-word; margin:4px 0; }
+  .note { color:var(--dim); padding:8px 0; }
+  .bad { color:var(--bad); } .warn { color:var(--warn); } .ok { color:var(--ok); }
+  canvas { display:block; background:#0e1116; }
+  #legend { padding:6px 14px; color:var(--dim); border-top:1px solid var(--line); background:var(--panel); }
+</style>
+
+<header>
+  <select id="cmd"></select>
+  <input id="term" placeholder="search term" autofocus>
+  <input id="limit" type="number" value="60" min="1" max="2000" style="width:80px" title="limit">
+  <button id="full" title="full values, not the brief form">full</button>
+  <button id="go">search</button>
+  <button id="graphBtn" title="draw the KB's links">graph</button>
+  <span id="stat" class="note"></span>
+</header>
+<main>
+  <div id="out"><div class="note">Pick a search, or press <b>graph</b> to see how the entries link.</div></div>
+  <div id="side"></div>
+</main>
+<div id="legend" style="display:none">
+  drag a node to pin it &middot; click to open it &middot;
+  <span class="ok">see_also</span> &middot; <span class="warn">relation</span> &middot;
+  <span class="bad">broken / violated</span>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let FULL = false, NODES = [], EDGES = [], anim = null;
+
+async function api(path) { const r = await fetch(path); return r.json(); }
+
+async function loadCommands() {
+  const d = await api("/api/commands");
+  $("cmd").innerHTML = (d.commands || []).map(c => `<option>${c}</option>`).join("");
+  // The CLI is the authority on what can be asked; if it grows a search this picker grows with it.
+  $("cmd").value = d.commands && d.commands.includes("annotation") ? "annotation" : ($("cmd").value);
+  $("stat").textContent = (d.commands || []).length + " searches";
+}
+
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function render(rows) {
+  const out = $("out");
+  if (!rows.length) { out.innerHTML = '<div class="note">No matches.</div>'; return; }
+  out.innerHTML = rows.map(r => {
+    const title = r.name || r.symbol || r.marker || r.source_name || r.entry || "";
+    const body = Object.keys(r).filter(k => k !== "name" && r[k] !== "" && r[k] !== null)
+      .map(k => `<div>${esc(k)}</div><div><pre>${esc(typeof r[k] === "object"
+                 ? JSON.stringify(r[k], null, 1) : r[k])}</pre></div>`).join("");
+    return `<div class="row"><h3>${esc(title)}</h3><div class="kv">${body}</div></div>`;
+  }).join("");
+}
+
+async function search() {
+  const cmd = $("cmd").value, term = $("term").value.trim();
+  $("stat").textContent = "...";
+  stopGraph();
+  const q = new URLSearchParams({ cmd, term, limit: $("limit").value });
+  if (FULL) q.set("full", "1");
+  const d = await api("/api/q?" + q);
+  if (d.text !== undefined) {
+    $("out").innerHTML = `<div class="row"><pre>${esc(d.text)}</pre></div>`;
+    $("stat").textContent = "rc=" + d.rc;
+    return;
+  }
+  const rows = Array.isArray(d.rows) ? d.rows : (d.rows.rows || []);
+  render(rows);
+  $("stat").textContent = rows.length + " rows";
+}
+
+/* ---- graph -------------------------------------------------------------------------------
+   A small force layout rather than a library: this tool ships with no dependencies and has to
+   work offline, and the whole layout is less code than vendoring one would be.                */
+function stopGraph() {
+  if (anim) { cancelAnimationFrame(anim); anim = null; }
+  $("legend").style.display = "none";
+}
+
+async function graph() {
+  $("stat").textContent = "building...";
+  const q = new URLSearchParams({ cmd: "graph", term: $("term").value.trim(), limit: 600 });
+  const d = await api("/api/q?" + q);
+  const data = Array.isArray(d.rows) ? {nodes:[],edges:[]} : d.rows;
+  NODES = (data.nodes || []).map((n, i) => ({...n,
+    x: 400 + 300 * Math.cos(i), y: 300 + 300 * Math.sin(i), vx: 0, vy: 0 }));
+  const byId = Object.fromEntries(NODES.map(n => [n.id, n]));
+  EDGES = (data.edges || []).filter(e => byId[e.from] && byId[e.to])
+                            .map(e => ({...e, a: byId[e.from], b: byId[e.to] }));
+  if (!NODES.length) { $("out").innerHTML = '<div class="note">Nothing to draw.</div>'; return; }
+
+  $("out").innerHTML = '<canvas id="cv"></canvas>';
+  $("legend").style.display = "";
+  const cv = $("cv"), ctx = cv.getContext("2d");
+  let drag = null, ox = 0, oy = 0, zoom = 1;
+  function size() { cv.width = cv.clientWidth = $("out").clientWidth - 28;
+                    cv.height = Math.max(400, $("out").clientHeight - 20); }
+  size(); addEventListener("resize", size);
+
+  const pt = e => ({ x: (e.offsetX - ox) / zoom, y: (e.offsetY - oy) / zoom });
+  cv.onmousedown = e => { const p = pt(e);
+    drag = NODES.find(n => Math.hypot(n.x - p.x, n.y - p.y) < 12) || {pan: true, px: e.offsetX - ox, py: e.offsetY - oy}; };
+  cv.onmousemove = e => { if (!drag) return; const p = pt(e);
+    if (drag.pan) { ox = e.offsetX - drag.px; oy = e.offsetY - drag.py; }
+    else { drag.x = p.x; drag.y = p.y; drag.fixed = true; } };
+  cv.onmouseup = e => {
+    if (drag && !drag.pan && !drag.moved) openNode(drag);
+    drag = null; };
+  cv.onwheel = e => { e.preventDefault(); zoom *= e.deltaY < 0 ? 1.1 : 0.9; };
+
+  function step() {
+    for (const n of NODES) {                       // repulsion
+      for (const m of NODES) {
+        if (n === m) continue;
+        let dx = n.x - m.x, dy = n.y - m.y, d2 = dx*dx + dy*dy || 1;
+        if (d2 < 90000) { const f = 900 / d2; n.vx += dx * f; n.vy += dy * f; }
+      }
+      n.vx += (cv.width/2 - n.x) * 0.0006;         // gentle centring
+      n.vy += (cv.height/2 - n.y) * 0.0006;
+    }
+    for (const e of EDGES) {                       // springs
+      const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, d = Math.hypot(dx, dy) || 1;
+      const f = (d - 120) * 0.008;
+      e.a.vx += dx/d*f; e.a.vy += dy/d*f; e.b.vx -= dx/d*f; e.b.vy -= dy/d*f;
+    }
+    for (const n of NODES) {
+      if (n.fixed) { n.vx = n.vy = 0; continue; }
+      n.vx *= 0.85; n.vy *= 0.85; n.x += n.vx; n.y += n.vy;
+    }
+    draw();
+    anim = requestAnimationFrame(step);
+  }
+  function edgeColour(e) {
+    if (["missing","ambiguous","VIOLATED","unchecked"].includes(e.status)) return "#e06c75";
+    return e.type === "see_also" ? "#3f5570" : "#e5c07b";
+  }
+  function draw() {
+    ctx.setTransform(zoom, 0, 0, zoom, ox, oy);
+    ctx.clearRect(-ox/zoom, -oy/zoom, cv.width/zoom, cv.height/zoom);
+    for (const e of EDGES) {
+      ctx.strokeStyle = edgeColour(e);
+      ctx.lineWidth = e.status && e.status !== "ok" ? 2 : 1;
+      ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); ctx.stroke();
+    }
+    for (const n of NODES) {
+      const open = (n.status || "") === "open";
+      ctx.fillStyle = open ? "#e5c07b" : (n.kind === "concept" ? "#6ea8fe" : "#98c379");
+      ctx.beginPath(); ctx.arc(n.x, n.y, 6, 0, 7); ctx.fill();
+      if (zoom > 0.6) {
+        ctx.fillStyle = "#8b96a5"; ctx.font = "11px monospace";
+        ctx.fillText(n.id.length > 34 ? n.id.slice(0, 33) + "…" : n.id, n.x + 9, n.y + 4);
+      }
+    }
+  }
+  step();
+  $("stat").textContent = NODES.length + " nodes, " + EDGES.length + " edges";
+}
+
+async function openNode(n) {
+  const side = $("side");
+  side.style.display = "block";
+  side.innerHTML = '<div class="note">loading ' + esc(n.id) + '...</div>';
+  const d = await api("/api/q?" + new URLSearchParams({cmd:"annotation", term:n.id, full:"1", limit:3}));
+  const rows = Array.isArray(d.rows) ? d.rows : [];
+  side.innerHTML = rows.length
+    ? rows.map(r => `<div class="row"><h3>${esc(r.name || n.id)}</h3><pre>${esc(
+        typeof r.value === "object" ? JSON.stringify(r.value, null, 1) : r.value || "")}</pre></div>`).join("")
+    : `<div class="note">${esc(n.id)} is referenced but has no entry of its own.</div>`;
+}
+
+$("go").onclick = search;
+$("graphBtn").onclick = graph;
+$("term").onkeydown = e => { if (e.key === "Enter") search(); };
+$("full").onclick = () => { FULL = !FULL; $("full").classList.toggle("on", FULL); };
+loadCommands();
+</script>

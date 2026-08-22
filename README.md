@@ -138,6 +138,21 @@ written — the failure this whole tool exists to avoid.
 Size and mtime is the same pair git's index uses, and it inherits the same caveat: a checkout can
 restore an old timestamp. `--force` is the answer to that, rather than making every build slow.
 
+## Browsing it
+
+```bash
+python3 .tools/serve_code_index.py        # http://127.0.0.1:8765/
+```
+
+Every search the CLI has, the browser has — because it does not implement any of them. It asks
+`/api/commands` what exists and forwards each query to `query_code_index.py --json`. Add a
+subcommand and it appears in the picker; there is one implementation of each search rather than two
+that drift.
+
+Press **graph** to draw the KB itself: entries as nodes, `see_also` and relations as edges, with
+broken links and violated relations in red. Drag to pin a node, click to open the entry. The layout
+is a few dozen lines in the page — no library, so it works offline like everything else here.
+
 ## Relations: claims the build can test
 
 `see_also` says two entries are related. A **relation** says something about the code, and every

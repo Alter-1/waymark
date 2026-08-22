@@ -397,6 +397,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Query source index.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite DB path")
     parser.add_argument("--json", action="store_true", help="Emit JSON")
+    # THE SERVER ASKS FOR THIS rather than keeping its own allowlist. A hand-kept list is how the
+    # old browser came to offer a fraction of the CLI's searches and never learn about new ones --
+    # `relations` shipped and the browser knew nothing about it. Taken from argparse itself, so it
+    # cannot drift from what actually exists.
+    parser.add_argument("--list-commands", action="store_true",
+                        help="Print every subcommand name as JSON and exit")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--brief", action="store_true", help="Emit compact text output (default)")
     mode.add_argument("--full", action="store_true", help="Emit expanded text output")
@@ -498,6 +504,11 @@ def main() -> int:
     p.add_argument("term", nargs="?", default="")
     p.add_argument("--limit", type=int, default=80)
 
+    p = sub.add_parser("graph",
+                       help="the KB as nodes and edges -- see_also, relations, shared subjects")
+    p.add_argument("term", nargs="?", default="", help="limit to entries matching this")
+    p.add_argument("--limit", type=int, default=400)
+
     p = sub.add_parser("relations",
                        help="declared code relations and whether the tree still supports them")
     p.add_argument("term", nargs="?", default="", help="symbol, relation or status")
@@ -506,6 +517,17 @@ def main() -> int:
     p = sub.add_parser("broken-links")
     p.add_argument("term", nargs="?", default="")
     p.add_argument("--limit", type=int, default=80)
+
+    # BEFORE parse_args(): the subcommand is required, so --list-commands on its own would be
+
+    # rejected as a usage error rather than answered.
+
+    if "--list-commands" in sys.argv:
+
+        print(json.dumps(sorted(sub.choices)))
+
+        return 0
+
 
     args = parser.parse_args()
     brief = not args.full
@@ -906,6 +928,61 @@ def main() -> int:
             (term, term, term, term, term, term, term, term, args.limit + 1),
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)
+    elif args.cmd == "graph":
+        # ONE PLACE BUILDS THIS. The browser draws the graph but does not know how to derive it --
+        # if it did, the two would drift the moment a new edge type is added, exactly as the old
+        # static-JSON browser drifted from the CLI's searches.
+        like = f"%{args.term}%"
+        nodes, edges = {}, []
+
+        def note(name, kind="", status=""):
+            if name and name not in nodes:
+                nodes[name] = {"id": name, "kind": kind, "status": status}
+            elif name and kind and not nodes[name]["kind"]:
+                nodes[name].update({"kind": kind, "status": status})
+
+        for name, kind, status in con.execute(
+                "SELECT name, kind, coalesce(status,'') FROM annotations "
+                "WHERE ? = '' OR name LIKE ? OR value LIKE ? ORDER BY name LIMIT ?",
+                (args.term, like, like, args.limit)):
+            note(name, kind, status)
+
+        # see_also, keyed on what it RESOLVED to: an edge drawn to the spelling rather than the
+        # subject puts the same entry on the canvas twice.
+        for src, target, resolved, status in con.execute(
+                "SELECT source_name, target, coalesce(resolved_name,''), status FROM kb_links"):
+            if src not in nodes and (resolved or target) not in nodes:
+                continue
+            dst = resolved or target
+            note(src); note(dst)
+            edges.append({"from": src, "to": dst, "type": "see_also", "status": status})
+
+        try:
+            for src, relation, target, status in con.execute(
+                    "SELECT source_name, relation, target, status FROM kb_relations"):
+                if src not in nodes and target not in nodes:
+                    continue
+                note(src); note(target)
+                edges.append({"from": src, "to": target, "type": relation, "status": status})
+        except sqlite3.Error:
+            pass
+
+        # A shared concept_id is the strongest link there is -- the entries are ABOUT the same
+        # thing -- but joining every pair would draw a clique. Carry it as a node property and let
+        # the viewer cluster on it.
+        for name, concept in con.execute(
+                "SELECT name, json_extract(value,'$.concept_id') FROM annotations"):
+            if name in nodes and concept:
+                nodes[name]["concept"] = concept
+
+        payload = {"nodes": sorted(nodes.values(), key=lambda n: n["id"]), "edges": edges}
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"{len(payload['nodes'])} nodes, {len(payload['edges'])} edges")
+            for e in edges[:args.limit]:
+                flag = "" if e["status"] in ("ok", "") else f"  [{e['status']}]"
+                print(f"  {e['from']}  --{e['type']}->  {e['to']}{flag}")
     elif args.cmd == "relations":
         term = f"%{args.term}%"
         cur = con.execute(
