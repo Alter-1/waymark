@@ -614,9 +614,25 @@ def main() -> int:
         # taken from the resolved_kind column name -- so every VALID link would have counted as
         # broken. It passed only because no entry used see_also, i.e. a guard that had never been
         # seen to fire. Name the bad states explicitly rather than listing the good ones.
-        broken = con.execute("SELECT count(*) FROM kb_links WHERE status IN "
-                             "('missing','ambiguous')").fetchone()[0]
-        chk("kb links resolve", broken == 0, f"{broken} unresolved (see broken-links)")
+        # A DECLARED LINK MUST RESOLVE; A REFERENCE IN PROSE NEED NOT. see_also is an assertion
+        # that a target exists, so an unresolved one is a defect. A [[name]] written mid-sentence is
+        # also allowed to be a FORWARD reference -- the convention is explicitly that it marks
+        # something worth writing later -- and some point at a different knowledge store entirely.
+        # Failing on those would leave the check permanently red, which is how a check gets ignored.
+        try:
+            broken = con.execute("SELECT count(*) FROM kb_links WHERE origin='see_also' AND status IN "
+                                 "('missing','ambiguous')").fetchone()[0]
+            loose = con.execute("SELECT count(*) FROM kb_links WHERE origin='inline' AND status IN "
+                                "('missing','ambiguous')").fetchone()[0]
+        except sqlite3.Error:
+            broken = con.execute("SELECT count(*) FROM kb_links WHERE status IN "
+                                 "('missing','ambiguous')").fetchone()[0]
+            loose = 0
+        chk("kb links resolve", broken == 0, f"{broken} declared links unresolved (see broken-links)")
+        if loose:
+            checks.append(("inline [[references]] resolve", "REVIEW",
+                           f"{loose} point at nothing here -- forward references, renames, or "
+                           f"another knowledge store"))
 
         # A HEADLINE THAT DISAGREES WITH ITS OWN ENTRY -- reported, never failed. verdict_conflict()
         # explains the two incidents behind it. This is a READING LIST, not a verdict: a mixed state

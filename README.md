@@ -149,6 +149,13 @@ Every search the CLI has, the browser has — because it does not implement any 
 subcommand and it appears in the picker; there is one implementation of each search rather than two
 that drift.
 
+Both kinds of link are indexed: the declared `see_also` field, and `[[name]]` written inline in
+prose — which is how most of them are actually written. On the tree this engine came from there were
+**232 inline references against 29 `see_also` entries**, none of them indexed, so nothing validated
+them and the graph showed an unconnected KB that is in fact densely cross-referenced. A declared
+link that does not resolve fails `selftest`; an inline one is reported but does not, because the
+convention allows a forward reference to something not written yet.
+
 Press **graph** to draw the KB itself: entries as nodes, `see_also` and relations as edges, with
 broken links and violated relations in red. Drag to pin a node, click to open the entry. The layout
 is a few dozen lines in the page — no library, so it works offline like everything else here.

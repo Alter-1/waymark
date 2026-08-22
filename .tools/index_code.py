@@ -59,7 +59,7 @@ SKIP_DIRS = {
     "build", "dist", "Production", "Archive",
 }
 MAX_FILE_BYTES = 2_000_000
-INDEX_SCHEMA_VERSION = "6"
+INDEX_SCHEMA_VERSION = "7"
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
@@ -465,6 +465,12 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
         CREATE INDEX IF NOT EXISTS kb_relations_status_idx ON kb_relations(status);
 
         CREATE TABLE IF NOT EXISTS kb_links(
+            -- WHERE THE LINK WAS WRITTEN. 'see_also' is the declared field; 'inline' is a [[name]]
+            -- written in the prose, which is how most of them are actually written -- 232 of them
+            -- against 29 see_also entries on the tree this engine came from. They were not indexed
+            -- at all, so nothing validated them and the link graph showed a KB that looked
+            -- unconnected when it is densely cross-referenced.
+            origin TEXT NOT NULL DEFAULT 'see_also',
             source_kind TEXT NOT NULL,
             source_name TEXT NOT NULL,
             target_type TEXT NOT NULL,
@@ -1621,16 +1627,18 @@ def insert_link(
     source_kind: str,
     source_name: str,
     raw_target: object,
+    origin: str = "see_also",
 ) -> None:
     target = parse_see_also_target(raw_target)
     if not target["target"]:
         return
     con.execute(
         """
-        INSERT INTO kb_links(source_kind, source_name, target_type, target, status, note)
-        VALUES(?,?,?,?,?,?)
+        INSERT INTO kb_links(origin, source_kind, source_name, target_type, target, status, note)
+        VALUES(?,?,?,?,?,?,?)
         """,
         (
+            origin,
             source_kind,
             source_name,
             target["target_type"],
@@ -1641,6 +1649,9 @@ def insert_link(
     )
 
 
+INLINE_LINK_RE = re.compile(r"\[\[([^\]|]{2,120})\]\]")
+
+
 def insert_links_for_item(con: sqlite3.Connection, source_kind: str, item: dict, fallback: str = "") -> None:
     source_name = source_name_for_item(item, fallback)
     see_also = item.get("see_also") or []
@@ -1648,6 +1659,24 @@ def insert_links_for_item(con: sqlite3.Connection, source_kind: str, item: dict,
         see_also = [see_also]
     for raw_target in see_also:
         insert_link(con, source_kind, source_name, raw_target)
+
+    # [[name]] IN THE PROSE IS A LINK TOO, and it is how nearly all of them are written: 232 inline
+    # references against 29 see_also entries on the tree this engine came from, 99 of them
+    # resolving to a real entry. None were indexed, with two consequences -- the link graph showed
+    # an unconnected KB that is in fact densely cross-referenced, and NOTHING VALIDATED THEM, so
+    # renaming an entry silently broke every reference to it in someone else's notes.
+    seen = set()
+    for key, value in item.items():
+        if key == "see_also" or not isinstance(value, str):
+            continue
+        for target in INLINE_LINK_RE.findall(value):
+            # A REFERENCE MAY BE WRAPPED ACROSS LINES. Prose is hard-wrapped, so [[a-long-entry-
+            # name]] arrives with a newline inside it and resolves against nothing -- which reads
+            # as a broken link rather than as a formatting artefact.
+            target = " ".join(target.split()).replace("- ", "-")
+            if target and target not in seen:
+                seen.add(target)
+                insert_link(con, source_kind, source_name, target, origin="inline")
 
 
 RELATION_KINDS = ("must_not_call_from",)
