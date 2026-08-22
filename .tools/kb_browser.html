@@ -33,6 +33,16 @@
   .note { color:var(--dim); padding:8px 0; }
   .bad { color:var(--bad); } .warn { color:var(--warn); } .ok { color:var(--ok); }
   canvas { display:block; background:#0e1116; }
+  .fld { margin:10px 0; }
+  .fld > .k { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .prose { white-space:pre-wrap; word-break:break-word; margin:2px 0 0; }
+  .chips { display:flex; flex-wrap:wrap; gap:4px; margin-top:3px; }
+  .chip { background:#0e1116; border:1px solid var(--line); border-radius:10px;
+          padding:1px 8px; font-size:12px; cursor:pointer; }
+  .chip:hover { border-color:var(--accent); color:var(--accent); }
+  a.ref { color:var(--accent); cursor:pointer; text-decoration:underline dotted; }
+  details.tree { margin:2px 0 2px 10px; }
+  details.tree > summary { cursor:pointer; color:var(--dim); }
   #legend { padding:6px 14px; color:var(--dim); border-top:1px solid var(--line); background:var(--panel); }
 </style>
 
@@ -86,6 +96,8 @@ function render(rows) {
   const out = $("out");
   if (!rows.length) { out.innerHTML = '<div class="note">No matches.</div>'; return; }
   out.innerHTML = rows.map(r => {
+    // A KB row IS an entry -- render it the way the panel does rather than as a key/value dump.
+    if (r.value !== undefined) return entryHtml(r, r.name || "");
     const title = r.name || r.symbol || r.marker || r.source_name || r.entry || "";
     const body = Object.keys(r).filter(k => k !== "name" && r[k] !== "" && r[k] !== null)
       .map(k => `<div>${esc(k)}</div><div><pre>${esc(typeof r[k] === "object"
@@ -227,6 +239,73 @@ async function graph() {
   $("stat").textContent = NODES.length + " nodes, " + EDGES.length + " edges";
 }
 
+/* ---- the entry, as something a person reads ------------------------------------------------
+   The panel used to print JSON.stringify of the whole record. These entries are mostly one very
+   long `notes` field, so that is a wall of escaped text with the useful parts -- what it is, what
+   is still open, what it links to -- buried in it. Known fields get a shape; anything unexpected
+   falls back to a collapsible tree rather than being dropped, because an entry is allowed to carry
+   a field this page has never heard of.                                                        */
+const FIELD_ORDER = ["brief", "notes", "status", "evidence", "min_fw", "kind", "concept_id",
+                     "keywords", "files", "commits", "see_also", "relations"];
+
+function linkify(text) {
+  // [[name]] is how most references are written; make them behave like the links they are.
+  return esc(text).replace(/\[\[([^\]]{2,120})\]\]/g,
+    (_, t) => `<a class="ref" data-node="${esc(t.replace(/\s+/g, " "))}">${esc(t)}</a>`);
+}
+
+function chips(values, cmd) {
+  return '<div class="chips">' + values.map(v =>
+    `<span class="chip" data-cmd="${esc(cmd)}" data-term="${esc(v)}">${esc(v)}</span>`).join("") + "</div>";
+}
+
+function tree(value, depth) {
+  if (value === null || value === undefined) return '<span class="note">null</span>';
+  if (Array.isArray(value)) {
+    if (!value.length) return '<span class="note">[]</span>';
+    return `<details class="tree"${depth < 1 ? " open" : ""}><summary>${value.length} items</summary>` +
+           value.map(v => `<div>${tree(v, depth + 1)}</div>`).join("") + "</details>";
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value);
+    if (!keys.length) return '<span class="note">{}</span>';
+    return `<details class="tree"${depth < 1 ? " open" : ""}><summary>${keys.length} fields</summary>` +
+           keys.map(k => `<div class="fld"><span class="k">${esc(k)}</span>` +
+                         `<div>${tree(value[k], depth + 1)}</div></div>`).join("") + "</details>";
+  }
+  return `<div class="prose">${linkify(String(value))}</div>`;
+}
+
+function entryHtml(rec, fallbackName) {
+  let v = rec.value;
+  if (typeof v === "string") { try { v = JSON.parse(v); } catch (e) { /* not JSON: show as prose */ } }
+  const title = rec.name || rec.symbol || rec.marker || fallbackName;
+  if (v === undefined || v === null || typeof v !== "object") {
+    return `<div class="row"><h3>${esc(title)}</h3><div class="prose">${linkify(String(v ?? ""))}</div></div>`;
+  }
+  const seen = new Set(["name"]);
+  let out = `<div class="row"><h3>${esc(title)}</h3>`;
+  const put = (k, body) => { seen.add(k); out += `<div class="fld"><span class="k">${esc(k)}</span>${body}</div>`; };
+  for (const k of FIELD_ORDER) {
+    if (!(k in v) || v[k] === "" || v[k] === null) { seen.add(k); continue; }
+    const val = v[k];
+    if (k === "keywords") put(k, chips(val, "annotation"));
+    else if (k === "files") put(k, chips(val, "file"));
+    else if (k === "commits") put(k, chips(val, "commits"));
+    else if (k === "see_also") put(k, '<div class="chips">' + (Array.isArray(val) ? val : [val]).map(t => {
+      const name = String(typeof t === "object" ? (t.target || t.name || "") : t).replace(/^\w+:/, "");
+      return `<span class="chip" data-node="${esc(name)}">${esc(name)}</span>`; }).join("") + "</div>");
+    else if (typeof val === "object") put(k, tree(val, 0));
+    else put(k, `<div class="prose">${linkify(String(val))}</div>`);
+  }
+  const rest = Object.keys(v).filter(k => !seen.has(k));
+  if (rest.length) {
+    out += `<div class="fld"><span class="k">other</span>${tree(
+      Object.fromEntries(rest.map(k => [k, v[k]])), 0)}</div>`;
+  }
+  return out + "</div>";
+}
+
 function closeSide() { $("side").style.display = "none"; }
 
 async function openNode(n) {
@@ -248,12 +327,21 @@ async function openNode(n) {
   const shut = '<button id="shut" title="close (Esc)" style="float:right">close</button>';
   side.innerHTML = shut + (rows.length
     ? `<div class="note">found via <b>${esc(via)}</b></div>` +
-      rows.map(r => `<div class="row"><h3>${esc(r.name || r.symbol || r.marker || n.id)}</h3><pre>${esc(
-        typeof r.value === "object" ? JSON.stringify(r.value, null, 1) : r.value || "")}</pre></div>`).join("")
+      rows.map(r => entryHtml(r, n.id)).join("")
     : `<div class="note">${esc(n.id)} is referenced but has no entry of its own.</div>`);
   $("shut").onclick = closeSide;
 }
 
+// DELEGATED, not per-element: the panel and the results list are rebuilt on every query, and
+// re-binding each chip after each render is how half of them end up dead.
+addEventListener("click", e => {
+  const el = e.target.closest && e.target.closest("[data-node],[data-cmd]");
+  if (!el) return;
+  if (el.dataset.node) { openNode({ id: el.dataset.node }); return; }
+  $("cmd").value = el.dataset.cmd;
+  $("term").value = el.dataset.term || "";
+  search();
+});
 addEventListener("keydown", e => { if (e.key === "Escape") closeSide(); });
 $("go").onclick = search;
 $("graphBtn").onclick = graph;
@@ -271,8 +359,12 @@ async function selftest() {
   try {
     await graph();
     log.push("nodes=" + NODES.length, "edges=" + EDGES.length);
+    // #selftest=<name> targets one entry: the first node is whatever sorts first, which is often a
+    // bare link target with no keywords or references, so "0 chips" says nothing either way.
+    const want = decodeURIComponent((location.hash.split("=")[1] || ""));
+    const pick = want ? (NODES.find(n => n.id === want) || { id: want }) : NODES[0];
     if (NODES.length) {
-      await openNode(NODES[0]);
+      await openNode(pick);
       const side = $("side");
       log.push("panel=" + (side.style.display === "block" ? "open" : "closed"));
       log.push("panelHasEntry=" + (side.textContent.includes("has no entry") ? "no" : "yes"));
@@ -285,5 +377,5 @@ async function selftest() {
   d.id = "__selftest"; d.setAttribute("data-result", log.join(" "));
   document.body.appendChild(d);
 }
-if (location.hash === "#selftest") { addEventListener("load", () => setTimeout(selftest, 400)); }
+if (location.hash.startsWith("#selftest")) { addEventListener("load", () => setTimeout(selftest, 400)); }
 </script>
