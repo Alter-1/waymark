@@ -138,6 +138,26 @@ written — the failure this whole tool exists to avoid.
 Size and mtime is the same pair git's index uses, and it inherits the same caveat: a checkout can
 restore an old timestamp. `--force` is the answer to that, rather than making every build slow.
 
+## The KB on disk
+
+A KB can be one JSON document, or a **directory with one file per entry** — the engine reads both,
+and `annotations` in `kb.config.json` may name several, so a project's own notes can sit beside a
+shared one (`["kb/", "~/kb/esp-idf/"]`).
+
+```bash
+python3 .tools/kb_split.py Docs/source_index_annotations.json Docs/kb
+```
+
+The split form is markdown with a small frontmatter block: long prose is the **body**, where it
+diffs like prose instead of arriving as one line full of `\n` escapes. Per-entry files mean two
+people editing different entries do not collide, and `git log kb/features/<name>.md` answers *when
+did this become true* — which a single blob cannot.
+
+The frontmatter dialect is deliberately tiny and is **not YAML**: `key: text`, `key: [json]`, or a
+`  - item` block list. Anything the reader cannot parse is an **error**, never a silently dropped
+field. `kb_split.py` round-trips the whole KB in memory and refuses to write if the result is not
+identical.
+
 ## Browsing it
 
 ```bash

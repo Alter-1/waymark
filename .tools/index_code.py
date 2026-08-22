@@ -46,7 +46,21 @@ def load_project_config() -> dict:
 
 
 PROJECT = load_project_config()
-DEFAULT_ANNOTATIONS = REPO_ROOT / PROJECT.get("annotations", "Docs/source_index_annotations.json")
+def _kb_path(entry: str) -> Path:
+    """A KB location from the config. Absolute or ~ paths are taken as-is -- that is how a SHARED
+    knowledge base (one esp-idf KB behind several projects) is named."""
+    expanded = Path(entry).expanduser()
+    return expanded if expanded.is_absolute() else REPO_ROOT / entry
+
+
+# `annotations` may name several KBs. The engine has always accepted several (--annotations is
+# repeatable); only the CONFIG was limited to one, which is what stopped a project from putting its
+# own notes beside a shared toolchain KB.
+_ANNOTATION_CONF = PROJECT.get("annotations") or "Docs/source_index_annotations.json"
+if isinstance(_ANNOTATION_CONF, str):
+    _ANNOTATION_CONF = [_ANNOTATION_CONF]
+DEFAULT_ANNOTATIONS = _kb_path(_ANNOTATION_CONF[0])
+EXTRA_ANNOTATIONS = [_kb_path(x) for x in _ANNOTATION_CONF[1:]]
 # Generic default: scan the repository itself; SKIP_DIRS keeps that sane.
 DEFAULT_ROOTS = list(PROJECT.get("roots") or ["."])
 
@@ -1497,7 +1511,7 @@ def snapshot_annotations(paths: list[Path]) -> None:
 
 
 def default_annotation_paths() -> list[Path]:
-    paths = [DEFAULT_ANNOTATIONS]
+    paths = [DEFAULT_ANNOTATIONS] + list(EXTRA_ANNOTATIONS)
     version = detect_fw_version()
     if version:
         version_path = DEFAULT_ANNOTATIONS.with_name(f"{BRANCH_ANNOTATION_PREFIX}.{normalize_version(version)}.json")
@@ -1992,13 +2006,159 @@ def load_params(con: sqlite3.Connection) -> None:
         pass
 
 
+# =============================================================================================
+# THE KB ON DISK: one file per entry.
+#
+# A single JSON document is unmergeable by construction -- two people editing DIFFERENT entries
+# still collide on the same file -- and it destroys per-fact history: `git log` over a 1 MB blob
+# cannot tell you when one note became true. It is also why every note here gets written through a
+# heredoc: `notes` is a JSON string, so real prose arrives full of \n escapes and diffs as one line.
+#
+# So: <root>/<collection>/<entry>.md, markdown with a small frontmatter block. Long prose is the
+# BODY, where it diffs like prose. Everything else is frontmatter.
+#
+# THE FRONTMATTER DIALECT IS DELIBERATELY TINY, and it is not YAML -- a real YAML parser is a
+# dependency this project does not take, and a partial one is worse than none because it fails
+# quietly. The rules are exactly:
+#     key: text                 a string, verbatim to end of line
+#     key: [..]  /  key: {..}   JSON, for anything structured (claims, see_also)
+#     key:                      followed by "  - item" lines, a list of strings
+# A value that cannot survive that -- a leading bracket, a newline -- is written as JSON instead,
+# and read back as JSON. Anything the reader cannot parse is an ERROR, never a silently dropped
+# field: losing one is exactly the failure this whole engine exists to prevent.
+BODY_FIELDS = ("brief", "notes", "meaning", "comment")
+KB_INDEX = "kb.json"
+
+
+def _fm_scalar(value: str) -> str:
+    """A frontmatter value that reads back as the same string."""
+    if value == "" or value != value.strip() or "\n" in value or value[0] in "[{\"'#-":
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def entry_to_text(item: dict) -> str:
+    front, body = [], []
+    for key in sorted(item):
+        value = item[key]
+        if key in BODY_FIELDS and isinstance(value, str):
+            body.append((key, value))
+        elif isinstance(value, str):
+            front.append("%s: %s" % (key, _fm_scalar(value)))
+        elif isinstance(value, list) and all(isinstance(x, str) for x in value):
+            if not value:
+                front.append("%s: []" % key)
+            else:
+                front.append("%s:" % key)
+                front += ["  - %s" % _fm_scalar(x) for x in value]
+        else:
+            front.append("%s: %s" % (key, json.dumps(value, ensure_ascii=False)))
+    out = ["---"] + front + ["---", ""]
+    for key, text in body:
+        out += ["## " + key, "", text.rstrip("\n"), ""]
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def text_to_entry(text: str, where: str) -> dict:
+    if not text.startswith("---\n"):
+        raise ValueError("%s: no frontmatter block" % where)
+    _, front, body = text.split("---\n", 2)
+    item: dict = {}
+    pending = None
+    for lineno, line in enumerate(front.splitlines(), 2):
+        if not line.strip():
+            continue
+        if line.startswith("  - "):
+            if pending is None:
+                raise ValueError("%s:%d: list item with no key above it" % (where, lineno))
+            item[pending].append(_read_value(line[4:], where, lineno))
+            continue
+        if ":" not in line:
+            raise ValueError("%s:%d: not 'key: value' -- %r" % (where, lineno, line[:60]))
+        key, _, raw = line.partition(":")
+        key, raw = key.strip(), raw.strip()
+        if raw == "":
+            item[key] = []
+            pending = key
+        else:
+            item[key] = _read_value(raw, where, lineno)
+            pending = None
+    for chunk in re.split(r"^## ", body, flags=re.M)[1:]:
+        head, _, rest = chunk.partition("\n")
+        item[head.strip()] = rest.strip("\n")
+    return item
+
+
+def _read_value(raw: str, where: str, lineno: int):
+    if raw and raw[0] in "[{\"":
+        try:
+            return json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("%s:%d: looks like JSON and is not -- %s" % (where, lineno, exc))
+    return raw
+
+
+def _entry_filename(item: dict, taken: set) -> str:
+    base = str(item.get("name") or item.get("concept_id") or item.get("symbol") or "entry")
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._") or "entry"
+    name = slug
+    n = 2
+    while name in taken:                      # names differing only in punctuation collide
+        name, n = "%s-%d" % (slug, n), n + 1
+    taken.add(name)
+    return name
+
+
+def write_kb_dir(data: dict, root: Path) -> int:
+    """Split one KB document into a directory of entry files. Returns the count written."""
+    root.mkdir(parents=True, exist_ok=True)
+    written = 0
+    collections = {}
+    for key, value in data.items():
+        if not isinstance(value, list):
+            continue
+        collections[key] = True
+        folder = root / key
+        folder.mkdir(exist_ok=True)
+        taken: set = set()
+        for item in value:
+            fn = _entry_filename(item, taken)
+            (folder / (fn + ".md")).write_text(entry_to_text(item), encoding="utf-8")
+            written += 1
+    head = {k: v for k, v in data.items() if not isinstance(v, list)}
+    head["collections"] = sorted(collections)
+    (root / KB_INDEX).write_text(json.dumps(head, indent=1, ensure_ascii=False) + "\n",
+                                 encoding="utf-8")
+    return written
+
+
+def read_kb_dir(root: Path) -> dict:
+    """Rebuild the KB document from a directory of entry files."""
+    index_path = root / KB_INDEX
+    data = json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file() else {}
+    collections = data.pop("collections", None)
+    if collections is None:
+        collections = sorted(p.name for p in root.iterdir() if p.is_dir())
+    for name in collections:
+        folder = root / name
+        items = []
+        if folder.is_dir():
+            for f in sorted(folder.glob("*.md")):
+                items.append(text_to_entry(f.read_text(encoding="utf-8"), str(f)))
+        data[name] = items
+    return data
+
+
 def load_annotations(con: sqlite3.Connection, path: Path) -> None:
     # Absent is not reported HERE: this function cannot tell a KB the project ASKED for from the
     # generic default in a repository that simply has no KB. The caller knows which it is and warns
     # there -- see the note at the load loop.
     if not path.exists():
         return
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # A DIRECTORY IS A KB TOO. It reconstructs the SAME document the single file produced, so every
+    # line below this is untouched by the split -- which is what makes the migration verifiable:
+    # the two readers must produce equal dicts, and that is a test, not an opinion.
+    data = read_kb_dir(path) if path.is_dir() else json.loads(path.read_text(encoding="utf-8"))
     label = data.get("branch") or data.get("version") or path.name
 
     for item in data.get("concepts", []):

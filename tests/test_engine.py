@@ -377,6 +377,79 @@ def main():
           "wal_append" in out, out.strip()[-200:])
 
 
+    # ---- the KB on disk: one file per entry ----------------------------------
+    # A single JSON document cannot be merged (two people editing DIFFERENT entries still collide
+    # on one file) and destroys per-fact history. Splitting it is only safe if the two readers
+    # agree EXACTLY, so that is what is asserted here rather than "it looks right".
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("index_code", TOOLS / "index_code.py")
+    _ic = _ilu.module_from_spec(_spec); sys.modules["index_code"] = _ic; _spec.loader.exec_module(_ic)
+
+    doc = {
+        "schema": 2, "scope": "shared",
+        "features": [
+            {"name": "plain", "kind": "feature", "status": "open", "keywords": ["a", "b"],
+             "notes": "Two lines.\nSecond one.", "brief": "A brief."},
+            # the shapes that break a naive writer: empty list, dicts inside a list, a value that
+            # starts with a bracket, leading/trailing space, a colon mid-string
+            {"name": "awkward", "kind": "feature", "files": [],
+             "see_also": [{"target": "plain", "note": "x: y"}],
+             "min_fw": "[not a list]", "evidence": "  padded  ",
+             "notes": "Has a colon: here, and a dash - there.\n\n  indented line"},
+            {"name": "weird/name*with:punct", "kind": "feature", "notes": "n"},
+        ],
+        "concepts": [{"concept_id": "c.one", "name": "one", "meaning": "M", "symbols": ["s"]}],
+    }
+    with tempfile.TemporaryDirectory() as tdk:
+        root = Path(tdk) / "kb"
+        wrote = _ic.write_kb_dir(doc, root)
+        back = _ic.read_kb_dir(root)
+        check("every entry becomes a file", wrote == 4, f"wrote {wrote}")
+        for coll in ("features", "concepts"):
+            a = sorted(doc[coll], key=lambda e: json.dumps(e, sort_keys=True))
+            b = sorted(back.get(coll, []), key=lambda e: json.dumps(e, sort_keys=True))
+            check(f"{coll} round-trip identical", a == b,
+                  str([ (x, y) for x, y in zip(a, b) if x != y ][:1])[:200])
+        check("top-level scalars survive", back.get("scope") == "shared" and back.get("schema") == 2,
+              str({k: back.get(k) for k in ("scope", "schema")}))
+        check("a name that is not a filename still round-trips",
+              any(e["name"] == "weird/name*with:punct" for e in back["features"]),
+              str([e["name"] for e in back["features"]]))
+
+        # A FIELD MUST NEVER BE DROPPED QUIETLY. That is the failure this engine exists to prevent,
+        # and a hand-edited entry is exactly where it would happen.
+        bad = root / "features" / "broken.md"
+        bad.write_text("---\nthis line has no colon\n---\n\n## notes\n\nx\n", encoding="utf-8")
+        try:
+            _ic.read_kb_dir(root)
+            check("an unparseable entry raises rather than dropping fields", False, "it was accepted")
+        except ValueError as exc:
+            check("an unparseable entry raises rather than dropping fields",
+                  "broken.md" in str(exc), str(exc)[:120])
+        bad.unlink()
+
+    # and the whole point: a directory KB indexes to the same thing a file KB does
+    with tempfile.TemporaryDirectory() as tdk2:
+        rep = Path(tdk2)
+        (rep / ".tools").mkdir(); (rep / "src").mkdir(); (rep / "Docs").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src" / "a.c").write_text("void plain(void){}\n", encoding="utf-8")
+        (rep / "Docs" / "kb.json").write_text(json.dumps(doc), encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "Docs/kb.json"}), encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        import sqlite3 as _s
+        dbf = sorted(rep.glob(".tools/code_index*.sqlite"))[0]
+        from_file = _s.connect(str(dbf)).execute("SELECT count(*) FROM annotations").fetchone()[0]
+        _ic.write_kb_dir(doc, rep / "Docs" / "kbdir")
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "Docs/kbdir"}), encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        from_dir = _s.connect(str(dbf)).execute("SELECT count(*) FROM annotations").fetchone()[0]
+        check("a directory KB indexes the same as a file KB", from_file == from_dir and from_dir > 0,
+              f"file={from_file} dir={from_dir}")
+
     # ---- relations: an assertion about the code that the build TESTS ---------
     # see_also says two entries are related. A relation says something about the CODE, and the
     # engine goes and checks it -- which is the difference between documentation and
