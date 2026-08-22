@@ -61,6 +61,17 @@ let FULL = false, NODES = [], EDGES = [], anim = null;
 
 async function api(path) { const r = await fetch(path); return r.json(); }
 
+// ONE PLACE UNWRAPS THE REPLY. Some searches answer with a bare list and some with
+// {rows, limit, more_available} -- the CLI adds the envelope wherever a result can be truncated.
+// search() handled both and openNode() did not, so EVERY click on the graph reported "referenced
+// but has no entry of its own", which reads as a hole in the KB rather than a bug in the page.
+function unwrap(d) {
+  const r = d && d.rows;
+  if (Array.isArray(r)) return r;
+  if (r && Array.isArray(r.rows)) return r.rows;
+  return [];
+}
+
 async function loadCommands() {
   const d = await api("/api/commands");
   $("cmd").innerHTML = (d.commands || []).map(c => `<option>${c}</option>`).join("");
@@ -95,7 +106,7 @@ async function search() {
     $("stat").textContent = "rc=" + d.rc;
     return;
   }
-  const rows = Array.isArray(d.rows) ? d.rows : (d.rows.rows || []);
+  const rows = unwrap(d);
   render(rows);
   $("stat").textContent = rows.length + " rows";
 }
@@ -112,7 +123,7 @@ async function graph() {
   $("stat").textContent = "building...";
   const q = new URLSearchParams({ cmd: "graph", term: $("term").value.trim(), limit: 600 });
   const d = await api("/api/q?" + q);
-  const data = Array.isArray(d.rows) ? {nodes:[],edges:[]} : d.rows;
+  const data = (d.rows && d.rows.nodes) ? d.rows : { nodes: [], edges: [] };
   NODES = (data.nodes || []).map((n, i) => ({...n,
     x: 400 + 300 * Math.cos(i), y: 300 + 300 * Math.sin(i), vx: 0, vy: 0 }));
   const byId = Object.fromEntries(NODES.map(n => [n.id, n]));
@@ -123,46 +134,74 @@ async function graph() {
   $("out").innerHTML = '<canvas id="cv"></canvas>';
   $("legend").style.display = "";
   const cv = $("cv"), ctx = cv.getContext("2d");
-  let drag = null, ox = 0, oy = 0, zoom = 1;
+  let drag = null, ox = 0, oy = 0, zoom = 1, alpha = 1, moved = false;
   function size() { cv.width = cv.clientWidth = $("out").clientWidth - 28;
                     cv.height = Math.max(400, $("out").clientHeight - 20); }
-  size(); addEventListener("resize", size);
+  size(); addEventListener("resize", () => { size(); reheat(); });
+
+  /* IT HAS TO STOP MOVING. Applying the forces at full strength every frame means the graph never
+     settles -- it drifts and wobbles indefinitely, which is unreadable and pins a core. Standard
+     annealing: one global alpha scales every force and decays toward zero, and the loop HALTS when
+     it is small enough. Any interaction reheats it, so it is live when you want it and still when
+     you are reading it. */
+  const ALPHA_DECAY = 0.022, ALPHA_MIN = 0.004, V_MAX = 12;
+  function reheat(a) { const was = alpha; alpha = Math.max(alpha, a === undefined ? 0.55 : a);
+                       if (was < ALPHA_MIN && !anim) anim = requestAnimationFrame(step); }
 
   const pt = e => ({ x: (e.offsetX - ox) / zoom, y: (e.offsetY - oy) / zoom });
-  cv.onmousedown = e => { const p = pt(e);
-    drag = NODES.find(n => Math.hypot(n.x - p.x, n.y - p.y) < 12) || {pan: true, px: e.offsetX - ox, py: e.offsetY - oy}; };
-  cv.onmousemove = e => { if (!drag) return; const p = pt(e);
-    if (drag.pan) { ox = e.offsetX - drag.px; oy = e.offsetY - drag.py; }
-    else { drag.x = p.x; drag.y = p.y; drag.fixed = true; } };
-  cv.onmouseup = e => {
-    if (drag && !drag.pan && !drag.moved) openNode(drag);
+  cv.onmousedown = e => { const p = pt(e); moved = false;
+    const hit = NODES.find(n => Math.hypot(n.x - p.x, n.y - p.y) < 12);
+    drag = hit || { pan: true, px: e.offsetX - ox, py: e.offsetY - oy };
+    if (hit) { hit.fixed = true; reheat(0.35); } };
+  cv.onmousemove = e => {
+    if (!drag) return;
+    moved = true;
+    const p = pt(e);
+    if (drag.pan) { ox = e.offsetX - drag.px; oy = e.offsetY - drag.py; draw(); }
+    else { drag.x = p.x; drag.y = p.y; drag.vx = drag.vy = 0; reheat(0.35); } };
+  cv.onmouseup = () => {
+    // A DRAG IS NOT A CLICK. `moved` was read here before it was ever set, so every drag also
+    // opened the entry -- the panel flickered open on each nudge.
+    if (drag && !drag.pan && !moved) openNode(drag);
+    else if (drag && drag.pan && !moved) closeSide();   // click on empty canvas dismisses it
     drag = null; };
-  cv.onwheel = e => { e.preventDefault(); zoom *= e.deltaY < 0 ? 1.1 : 0.9; };
+  cv.onwheel = e => { e.preventDefault(); zoom *= e.deltaY < 0 ? 1.1 : 0.9; draw(); };
 
   function step() {
-    for (const n of NODES) {                       // repulsion
-      for (const m of NODES) {
-        if (n === m) continue;
-        let dx = n.x - m.x, dy = n.y - m.y, d2 = dx*dx + dy*dy || 1;
-        if (d2 < 90000) { const f = 900 / d2; n.vx += dx * f; n.vy += dy * f; }
+    const k = alpha;
+    for (let i = 0; i < NODES.length; i++) {
+      const n = NODES[i];
+      for (let j = i + 1; j < NODES.length; j++) {     // each pair once, not twice
+        const m = NODES[j];
+        let dx = n.x - m.x, dy = n.y - m.y, d2 = dx*dx + dy*dy;
+        if (d2 > 90000 || d2 === 0) continue;
+        const f = 900 / d2 * k;
+        n.vx += dx * f; n.vy += dy * f; m.vx -= dx * f; m.vy -= dy * f;
       }
-      n.vx += (cv.width/2 - n.x) * 0.0006;         // gentle centring
-      n.vy += (cv.height/2 - n.y) * 0.0006;
+      n.vx += (cv.width/2 - n.x) * 0.0009 * k;
+      n.vy += (cv.height/2 - n.y) * 0.0009 * k;
     }
-    for (const e of EDGES) {                       // springs
+    for (const e of EDGES) {
       const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, d = Math.hypot(dx, dy) || 1;
-      const f = (d - 120) * 0.008;
+      const f = (d - 120) * 0.010 * k;
       e.a.vx += dx/d*f; e.a.vy += dy/d*f; e.b.vx -= dx/d*f; e.b.vy -= dy/d*f;
     }
     for (const n of NODES) {
       if (n.fixed) { n.vx = n.vy = 0; continue; }
-      n.vx *= 0.85; n.vy *= 0.85; n.x += n.vx; n.y += n.vy;
+      n.vx *= 0.80; n.vy *= 0.80;
+      // Clamp: one close pair can otherwise fling a node across the canvas in a single frame,
+      // which then drags its neighbours after it and the whole sheet ripples.
+      const v = Math.hypot(n.vx, n.vy);
+      if (v > V_MAX) { n.vx = n.vx / v * V_MAX; n.vy = n.vy / v * V_MAX; }
+      n.x += n.vx; n.y += n.vy;
     }
+    alpha -= alpha * ALPHA_DECAY;
     draw();
-    anim = requestAnimationFrame(step);
+    if (alpha > ALPHA_MIN) { anim = requestAnimationFrame(step); }
+    else { anim = null; $("stat").textContent = NODES.length + " nodes, " + EDGES.length + " edges (settled)"; }
   }
   function edgeColour(e) {
-    if (["missing","ambiguous","VIOLATED","unchecked"].includes(e.status)) return "#e06c75";
+    if (["missing", "ambiguous", "VIOLATED", "unchecked"].includes(e.status)) return "#e06c75";
     return e.type === "see_also" ? "#3f5570" : "#e5c07b";
   }
   function draw() {
@@ -170,38 +209,81 @@ async function graph() {
     ctx.clearRect(-ox/zoom, -oy/zoom, cv.width/zoom, cv.height/zoom);
     for (const e of EDGES) {
       ctx.strokeStyle = edgeColour(e);
-      ctx.lineWidth = e.status && e.status !== "ok" ? 2 : 1;
+      ctx.lineWidth = (e.status && e.status !== "ok") ? 2 : 1;
       ctx.beginPath(); ctx.moveTo(e.a.x, e.a.y); ctx.lineTo(e.b.x, e.b.y); ctx.stroke();
     }
     for (const n of NODES) {
       const open = (n.status || "") === "open";
-      ctx.fillStyle = open ? "#e5c07b" : (n.kind === "concept" ? "#6ea8fe" : "#98c379");
+      ctx.fillStyle = n.fixed ? "#6ea8fe" : (open ? "#e5c07b" : "#98c379");
       ctx.beginPath(); ctx.arc(n.x, n.y, 6, 0, 7); ctx.fill();
       if (zoom > 0.6) {
         ctx.fillStyle = "#8b96a5"; ctx.font = "11px monospace";
-        ctx.fillText(n.id.length > 34 ? n.id.slice(0, 33) + "…" : n.id, n.x + 9, n.y + 4);
+        ctx.fillText(n.id.length > 34 ? n.id.slice(0, 33) + "\u2026" : n.id, n.x + 9, n.y + 4);
       }
     }
   }
+
   step();
   $("stat").textContent = NODES.length + " nodes, " + EDGES.length + " edges";
 }
+
+function closeSide() { $("side").style.display = "none"; }
 
 async function openNode(n) {
   const side = $("side");
   side.style.display = "block";
   side.innerHTML = '<div class="note">loading ' + esc(n.id) + '...</div>';
-  const d = await api("/api/q?" + new URLSearchParams({cmd:"annotation", term:n.id, full:"1", limit:3}));
-  const rows = Array.isArray(d.rows) ? d.rows : [];
-  side.innerHTML = rows.length
-    ? rows.map(r => `<div class="row"><h3>${esc(r.name || n.id)}</h3><pre>${esc(
+  // A NODE IS NOT ALWAYS AN ENTRY. Many are link TARGETS -- a symbol, an API marker, a route, a
+  // file -- and asking `annotation` about those correctly finds nothing, which made the panel say
+  // "referenced but has no entry" for every one of them. Try the lookups the CLI already has.
+  let rows = [], via = "";
+  for (const cmd of ["annotation", "concept", "symbol", "constant", "api", "route", "file"]) {
+    const d = await api("/api/q?" + new URLSearchParams({cmd, term: n.id, full: "1", limit: 3}));
+    rows = unwrap(d).filter(r =>
+      cmd === "annotation" || [r.name, r.symbol, r.marker, r.file].includes(n.id));
+    if (rows.length) { via = cmd; break; }
+  }
+  // THERE MUST BE A WAY OUT. The panel opened on a click and nothing closed it: no control, no
+  // key, no click-away. Three, because each is the one somebody reaches for first.
+  const shut = '<button id="shut" title="close (Esc)" style="float:right">close</button>';
+  side.innerHTML = shut + (rows.length
+    ? `<div class="note">found via <b>${esc(via)}</b></div>` +
+      rows.map(r => `<div class="row"><h3>${esc(r.name || r.symbol || r.marker || n.id)}</h3><pre>${esc(
         typeof r.value === "object" ? JSON.stringify(r.value, null, 1) : r.value || "")}</pre></div>`).join("")
-    : `<div class="note">${esc(n.id)} is referenced but has no entry of its own.</div>`;
+    : `<div class="note">${esc(n.id)} is referenced but has no entry of its own.</div>`);
+  $("shut").onclick = closeSide;
 }
 
+addEventListener("keydown", e => { if (e.key === "Escape") closeSide(); });
 $("go").onclick = search;
 $("graphBtn").onclick = graph;
 $("term").onkeydown = e => { if (e.key === "Enter") search(); };
 $("full").onclick = () => { FULL = !FULL; $("full").classList.toggle("on", FULL); };
 loadCommands();
+
+// A SEAM SO THIS PAGE CAN BE CHECKED WITHOUT A HUMAN. Opening it with #selftest draws the graph,
+// opens the first node, and records what happened in a div -- which a headless engine can read.
+// Every bug in this page so far (a drag counted as a click, a panel with no way out, every click
+// reporting "no entry" because one of two reply shapes was unhandled) was invisible to a syntax
+// check and obvious the moment something actually clicked.
+async function selftest() {
+  const log = [];
+  try {
+    await graph();
+    log.push("nodes=" + NODES.length, "edges=" + EDGES.length);
+    if (NODES.length) {
+      await openNode(NODES[0]);
+      const side = $("side");
+      log.push("panel=" + (side.style.display === "block" ? "open" : "closed"));
+      log.push("panelHasEntry=" + (side.textContent.includes("has no entry") ? "no" : "yes"));
+      log.push("closeButton=" + ($("shut") ? "yes" : "no"));
+      closeSide();
+      log.push("afterClose=" + (side.style.display === "none" ? "closed" : "STILL OPEN"));
+    }
+  } catch (e) { log.push("ERROR=" + e.message); }
+  const d = document.createElement("div");
+  d.id = "__selftest"; d.setAttribute("data-result", log.join(" "));
+  document.body.appendChild(d);
+}
+if (location.hash === "#selftest") { addEventListener("load", () => setTimeout(selftest, 400)); }
 </script>
