@@ -130,6 +130,11 @@ test "$(git rev-parse --abbrev-ref HEAD)" = "$expected" || exit 1
 anything a colleague already staged rides along under your message. Use `git commit -- <paths>`, or
 read `git diff --cached --name-only` first.
 
+**But `git commit -- <paths>` only commits TRACKED files.** A new file matching the pathspec is
+silently skipped — no warning, and the commit succeeds. `git add` it first. Discovered by shipping a
+commit that was supposed to contain a new document and did not; the safer form has its own way of
+doing less than you asked.
+
 **One task at a time, and read the result.** Finish or abort one operation before starting another;
 a dirty tree makes `checkout` fail *silently*, and every later command then runs on the wrong branch.
 
