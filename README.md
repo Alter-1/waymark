@@ -25,6 +25,11 @@ $ waymark/.tools/query_code_index.py claim --status dead
 That entry is the point of the tool. Somebody spent days on that theory. Without it written down,
 the next person spends them again — and the search that finds it is a search for the *symptom*.
 
+A knowledge base only helps if the way you work produces knowledge worth keeping, and does not
+destroy the evidence first. **[`Docs/BEST-PRACTICE.md`](Docs/BEST-PRACTICE.md)** collects the working
+habits that make that true — distilled from a real project, each one written with the failure that
+produced it.
+
 ## Quick start
 
 ```bash

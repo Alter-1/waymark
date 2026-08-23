@@ -1,5 +1,12 @@
 # Agent Instructions
 
+Read **[`Docs/BEST-PRACTICE.md`](Docs/BEST-PRACTICE.md)** before working on a codebase with waymark
+in it. It is short, and it is the difference between an agent that leaves knowledge behind and one
+that leaves a mess: verify the report before fixing it, explain the diagnosis before editing, prove
+a test fails without the fix, assert the branch in the same step as the commit, keep the evidence on
+failure, and record the dead ends as well as the answer.
+
+
 ## Use Waymark First
 
 Before any investigation, bugfix, porting, release-note work, or test planning:

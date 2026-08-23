@@ -178,3 +178,17 @@ python3 .tools/serve_code_index.py          # browse it, press "graph"
 `selftest` reports the ways a KB goes wrong quietly: an index built from a missing file, a
 `see_also` pointing at nothing, a claim with no provenance, an entry whose one-line summary
 contradicts its own status. It exits non-zero, so it belongs in CI or a pre-commit hook.
+
+---
+
+## Then: the habits, not just the tool
+
+Installing waymark gives you somewhere to put knowledge. It does not make knowledge appear, and it
+does not stop a workflow from destroying the evidence before anyone writes it down.
+
+**[`Docs/BEST-PRACTICE.md`](Docs/BEST-PRACTICE.md)** is the companion to this file: verify before you
+fix, explain before you edit, make absence loud, keep the evidence of failure, record the dead ends,
+and never let a secret be guarded by a fact about which file it happens to sit in. Each practice is
+written with the concrete failure that produced it.
+
+If you are adopting this for a team, that document is the part worth reading together.
