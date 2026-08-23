@@ -879,6 +879,66 @@ def main():
         check("a branch_scoped claim NO sibling supports is reported missing, not excused",
               status_of() == "missing", "got %r -- a typo would hide here" % status_of())
 
+
+    # A KB-ONLY EDIT MUST TRIGGER A REBUILD. file_state() stats the path it is given, so for a
+    # DIRECTORY KB it saw the root's own mtime -- which changes when a subdirectory appears and at
+    # no other time. Adding or editing `features/x.md`, two levels down, moved nothing, so the
+    # engine reported "fresh" and skipped the rebuild: the entry was on disk, the reader could see
+    # it, and the index silently did not have it. It hid because ANY source edit forces a full
+    # rebuild and picks the KB up on the way past -- only a KB-only edit, the normal case when
+    # recording a finding, exposes it.
+    with tempfile.TemporaryDirectory() as tdf:
+        rep = Path(tdf)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int f(void) { return 1; }\n", encoding="utf-8")
+        kbdir = rep / "kb"
+        (kbdir / "features").mkdir(parents=True)
+        (kbdir / "kb.json").write_text(json.dumps(
+            {"schema": 2, "collections": ["features"]}), encoding="utf-8")
+        (kbdir / "features" / "first.md").write_text(
+            "---\nname: first-entry\nkind: feature\nstatus: n/a\n---\n\n## brief\n\none\n",
+            encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "kb"}), encoding="utf-8")
+
+        def count():
+            import sqlite3 as _s
+            dbs = [d for d in (rep / ".tools").glob("code_index.*.sqlite")
+                   if not d.name.endswith(".tmp")]
+            if not dbs:
+                return -1
+            c = _s.connect(str(dbs[0]))
+            n = c.execute("SELECT count(*) FROM annotations").fetchone()[0]
+            c.close()
+            return n
+
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("a directory KB indexes at all", count() == 1, "got %d" % count())
+
+        # ADD an entry, touch NO source, rebuild.
+        (kbdir / "features" / "second.md").write_text(
+            "---\nname: second-entry\nkind: feature\nstatus: n/a\n---\n\n## brief\n\ntwo\n",
+            encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("a KB-only ADD is picked up without touching source",
+              count() == 2, "got %d -- the freshness check skipped the rebuild" % count())
+
+        # EDIT an existing entry, touch no source, rebuild.
+        (kbdir / "features" / "second.md").write_text(
+            "---\nname: second-entry\nkind: feature\nstatus: n/a\nkeywords:\n  - edited\n---"
+            "\n\n## brief\n\nCHANGED\n", encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "annotation", "edited"], cwd=rep)
+        check("a KB-only EDIT is picked up too", "second-entry" in out, out.strip()[:120])
+
+        # DELETE one, rebuild.
+        (kbdir / "features" / "second.md").unlink()
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("a KB-only DELETE is picked up", count() == 1, "got %d" % count())
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

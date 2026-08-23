@@ -159,6 +159,11 @@ the reference is itself a record that the thing once existed.
 
 ## Rebuilding
 
+> **Rebuild after every KB edit, and after every `git pull` of a shared KB.** The index is built
+> per checkout and is not shared: a note somebody else committed does not exist for you until you
+> rebuild. Nothing warns you — a query just answers "No matches", which reads as *nobody wrote that
+> down* rather than *your index is behind*.
+
 ```bash
 python3 .tools/index_code.py            # re-scans only what changed
 python3 .tools/index_code.py --force    # everything, from scratch

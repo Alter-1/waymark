@@ -216,6 +216,38 @@ def meta_value(con: sqlite3.Connection, key: str) -> str | None:
     return row[0] if row else None
 
 
+def kb_state(paths: list) -> list:
+    """Freshness state for KB paths -- CONTENT for a directory, stat for a file.
+
+    file_state() stats the path it is given. For a directory that is the directory's OWN size and
+    mtime, which changes when a subdirectory is created and at no other time. Adding, editing or
+    deleting an ENTRY -- `features/x.md`, two levels down -- moves nothing the root can see.
+
+    So from the day KBs became directories, `index_code.py` reported "fresh" and skipped the
+    rebuild whenever ONLY the knowledge base had changed. The note was on disk, the reader could
+    see it, and the index silently did not have it. Measured before the fix: adding an entry and
+    editing an entry both left the digest byte-identical, while the content digest moved for both.
+
+    It hid for as long as it did because any source edit -- including one to this engine, which is
+    part of the source digest -- forces a full rebuild and picks the KB up on the way past. Only a
+    KB-ONLY edit, which is the normal case when recording a finding, exposed it.
+
+    _kb_bytes() already produces a deterministic archive of a KB directory for the backups, so its
+    hash is exactly the content fingerprint needed here.
+    """
+    out = []
+    for path in sorted(paths):
+        if path.is_dir():
+            try:
+                raw, _ = _kb_bytes(path)
+                out.append({"path": rel_or_text(path), "kb_content": hashlib.sha256(raw).hexdigest()})
+                continue
+            except OSError:
+                pass        # fall through to the stat form; missing is reported there
+        out.extend(file_state([path]))
+    return out
+
+
 def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_digest: str) -> bool:
     try:
         return (
@@ -2444,7 +2476,7 @@ def main() -> int:
         "engine": file_state([Path(__file__)]),
         "files": file_state(files),
     })
-    annotation_digest = digest_state(file_state(annotation_paths))
+    annotation_digest = digest_state(kb_state(annotation_paths))
     # symbol_metadata is PERSISTENT and hand-edited -- the docs invite editing it -- but it is not a
     # file, so no file digest notices a change. Without this a cached run reports "fresh" and, since
     # the JSON is only exported when missing, an edit stays invisible in code_index.<branch>.json.
