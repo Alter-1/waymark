@@ -38,6 +38,13 @@ Everything below runs against `sample/`, a small append-only key-value store inc
 repository, and its knowledge base in `Docs/source_index_annotations.json`. The examples are real:
 copy and paste them.
 
+**Where does a knowledge base actually live?** It is a folder of markdown files, one per entry, and
+where that folder sits — beside your code, on a branch of its own, or in a separate repository — is
+your choice. If that is the question you came with, skip ahead to
+[The KB on disk](#the-kb-on-disk) and [Managing it with git](#managing-it-with-git); the sample here
+uses the older single-JSON form, which the engine still reads, so it is not a good picture of the
+layout you want for a real project.
+
 ## Finding things
 
 ```bash
@@ -140,27 +147,183 @@ restore an old timestamp. `--force` is the answer to that, rather than making ev
 
 ## The KB on disk
 
-Three separate things, and conflating them is the usual source of confusion: **what one entry
-looks like**, **how the directory is arranged**, and **where that directory lives**. `Docs/STORAGE.md`
-lays all three out with a worked example — read that if you are adopting this on your own project.
+**A knowledge base is a folder of markdown files.** That is the entire storage format — no
+database, no server, no lock file. You can read it with `cat`, edit it in any editor, and diff it
+in a code review. Everything else on this page is built from that one fact.
 
-The short version: a KB can be one JSON document, or a **directory with one file per entry** — the
-engine reads both, and `annotations` in `kb.config.json` may name several, so a project's own notes
-can sit beside a shared one (`["kb/", "~/kb/esp-idf/"]`).
+If you are starting from nothing:
 
 ```bash
-python3 .tools/kb_split.py Docs/source_index_annotations.json Docs/kb
+mkdir -p kb/features kb/concepts            # 1. make the folder
+$EDITOR kb.config.json                      # 2. "annotations": "kb"
+python3 .tools/index_code.py                # 3. build the index
 ```
 
-The split form is markdown with a small frontmatter block: long prose is the **body**, where it
-diffs like prose instead of arriving as one line full of `\n` escapes. Per-entry files mean two
-people editing different entries do not collide, and `git log kb/features/<name>.md` answers *when
-did this become true* — which a single blob cannot.
+### 1. One entry is one file
 
-The frontmatter dialect is deliberately tiny and is **not YAML**: `key: text`, `key: [json]`, or a
-`  - item` block list. Anything the reader cannot parse is an **error**, never a silently dropped
-field. `kb_split.py` round-trips the whole KB in memory and refuses to write if the result is not
-identical.
+The filename is the entry's name. A small frontmatter block, then ordinary prose:
+
+```markdown
+--- kb/routes/uart0.md ---
+---
+name: FBI UART0
+concept_id: fbi.channel.uart0
+destination: UART0
+protocol: raw/crsf/sbus/mavlink depending on per-port config
+file: Eth2Serial/Eth2Serial.h
+---
+
+## notes
+
+Often regular UART; may be single-wire in special configurations.
+```
+
+Long explanations go in the **body**, below the frontmatter — there they diff like prose instead of
+arriving as one line full of `\n` escapes.
+
+The frontmatter dialect is deliberately tiny and is **not YAML**. Three forms, nothing else:
+
+```
+key: plain text to the end of the line
+key: [{"json": "when you need structure"}]
+key:
+  - one list item
+  - another
+```
+
+Anything the reader cannot parse is an **error** naming the file and line — never a silently
+dropped field. That is what makes the format safe to hand-edit.
+
+### 2. The files sit in named folders
+
+Each folder is a **collection**, and the names are a fixed vocabulary — not cosmetic. Each one
+lands in a different table and is reached by a different query:
+
+```
+kb/                                      ← whatever `annotations` in kb.config.json points at
+├── kb.json                              ← lists the collections below
+├── features/                            ← how something behaves; ported/verified status
+│   ├── io32-slot3-guarded.md
+│   └── wifi-apply-freeze.md
+├── concepts/                            ← incidents, open bugs, root causes, invariants
+│   └── aes-parallel-uart-crash.md
+├── routes/                              ← endpoints and channels
+├── symbols/                             ← notes bound to one symbol (add_note.py writes here)
+└── symbol_comments/                     ← hard-won rules left at an exact code site
+```
+
+| folder | you read it back with |
+|---|---|
+| `features/` | `query_code_index.py annotation <keyword>` |
+| `concepts/` | `query_code_index.py concept <id>` |
+| `routes/` | `query_code_index.py route <name>` |
+| `symbols/` | `query_code_index.py notes <Symbol>` |
+| `symbol_comments/` | `query_code_index.py comment <term>` |
+
+Two more things may appear in that folder later: a per-version overlay JSON, which **must stay
+inside the KB directory** because it is found relative to it, and nothing else. If `kb.json` is
+missing, every non-dotted subdirectory is treated as a collection — which is why `.git` sitting
+beside the entry folders does not break anything.
+
+### 3. What is NOT part of the KB
+
+`.tools/code_index.*.sqlite` is **generated** — one per branch, rebuilt by `index_code.py` from the
+KB plus a scan of your source. **Gitignore it.** Never edit it, and never treat a query result as
+the record. Delete it and nothing is lost.
+
+A rebuild against a missing KB produces an *empty* index **without erroring**, which is the failure
+that looks most like success. Check the entry count after a rebuild.
+
+## Managing it with git
+
+The engine never looks at where the folder lives — that is your call. Three arrangements work:
+
+| arrangement | good for | cost |
+|---|---|---|
+| a plain folder, gitignored | notes that must never leave the machine | no history, no sharing |
+| **an orphan branch, as a worktree** | shipping the KB with the repo everyone already has | none worth naming — start here |
+| its own repository | a KB spanning several projects, or a different audience | one more thing to clone |
+
+### Why not just commit it on your main branch
+
+Because the KB is edited from every branch. A file that lives on `main` and is edited while you are
+on a feature branch either follows you (and shows up in your code diffs) or does not (and your notes
+vanish when you switch). An **orphan branch** sidesteps both: it is a branch in the same repository
+that shares *no history* with any other, so it never merges into your code and your code never
+merges into it.
+
+A **worktree** is git checking out a second branch into a second folder at the same time. Together
+they give you a KB folder that stays put while you `git checkout` in the code tree.
+
+```bash
+git checkout --orphan kb          # a branch with no shared history
+git rm -rf .                      # nothing but the KB lives here
+mkdir features concepts
+git add . && git commit -m "kb: initial import"
+git checkout main                 # back to your code
+
+git worktree add ~/kb/myproject kb    # the KB now lives here, permanently
+```
+
+```
+$ git worktree list
+/home/…/myproject     4f2a1c9 [main]      ← your code
+/home/…/kb/myproject  a908d5c [kb]        ← your KB
+
+$ git -C ~/kb/myproject rev-parse --git-common-dir
+/home/…/myproject/.git                    ← the SAME repository, not a clone
+```
+
+Point `kb.config.json` at it and you are done:
+
+```json
+"annotations": "~/kb/myproject"
+```
+
+### Day to day
+
+Record, rebuild, commit — KB edits in the KB worktree, code in the code tree. Two branches, never
+staged together:
+
+```bash
+python3 .tools/add_note.py <Symbol> "<finding>" --keywords "a, b"
+python3 .tools/index_code.py
+git -C ~/kb/myproject add features/<name>.md
+git -C ~/kb/myproject commit -m "kb: ..."
+```
+
+What that buys you: `git -C ~/kb/myproject log features/<name>.md` answers *when did this become
+true*, and two people editing two different entries never touch the same file.
+
+Four rules, each of which exists because breaking it cost someone a day:
+
+* **Never commit the generated index.**
+* **Never `git add -A` in the KB** — it sweeps in the index and whatever else is lying around. Name
+  the paths, or use `git add -u`.
+* **Never merge the KB branch with a code branch**, in either direction.
+* **Keep the version overlay inside the KB folder** — it is found relative to the KB, so moving the
+  KB without it orphans it silently.
+
+### Public and local halves
+
+`annotations` also takes a **list**, so a shared KB can sit beside one that is in no repository at
+all:
+
+```json
+"annotations": ["~/kb/myproject", "~/kb/myproject.local"]
+```
+
+Both are merged into one index and one search — only `git` tells them apart. Site-specific material
+(bench addresses, personal network details, customer particulars) goes in the local folder. Prefer
+that over marking an entry private: a file merely *marked* local still sits in the tracked worktree,
+and one `git add` publishes it. A folder in no repository cannot be pushed by accident.
+
+When an entry has both, **split it** rather than hiding it whole — the general finding goes public
+where other people can use it, the values stay local, and the two cross-link. Most bench notes are
+90 % general; moving them wholesale would gut the shared KB of exactly the root-cause work it
+exists to carry.
+
+`Docs/STORAGE.md` goes deeper, with the reasoning behind each rule.
 
 ## Browsing it
 
