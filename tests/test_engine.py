@@ -718,6 +718,45 @@ def main():
         changed, _ = ic._kb_bytes(kb)
         check("an edited entry changes the digest", changed != blob)
 
+        # A SYMLINK MUST NOT BECOME A SYMLINK ENTRY. tarfile defaults to dereference=False, so the
+        # first version of this archived `features/x.md -> /abs/path/outside/secret.txt` with ZERO
+        # bytes of content: restoring it recreated a link pointing OUT of the KB, and the entry
+        # itself -- which read_kb_dir DOES index, because read_text() follows links -- was never
+        # saved. Reported by review, reproduced, fixed by dereferencing.
+        outside = Path(td) / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("from outside\n", encoding="utf-8")
+        (outside / "sub").mkdir()
+        (outside / "sub" / "deep.md").write_text("deep\n", encoding="utf-8")
+        try:
+            os.symlink(str(kb / "features" / "a.md"), str(kb / "features" / "in.md"))
+            os.symlink(str(outside / "secret.txt"),   str(kb / "features" / "out.md"))
+            os.symlink(str(outside / "sub"),          str(kb / "features" / "subdir"))
+            os.symlink(str(Path(td) / "nothing"),     str(kb / "features" / "dangling.md"))
+            have_links = True
+        except (OSError, NotImplementedError):
+            have_links = False        # Windows without the privilege; skip rather than fail
+        if have_links:
+            blob2, _ = ic._kb_bytes(kb)
+            members = _tar.open(fileobj=_io.BytesIO(blob2)).getmembers()
+            byname = {m.name: m for m in members}
+            check("no symlink entry is ever archived",
+                  not any(m.issym() or m.islnk() for m in members),
+                  ", ".join(m.name for m in members if m.issym()))
+            check("a symlinked entry is archived with its CONTENT",
+                  byname.get("features/out.md") is not None
+                  and byname["features/out.md"].isreg()
+                  and byname["features/out.md"].size > 0,
+                  "read_kb_dir indexes it, so the backup must contain it")
+            check("a dangling link is skipped", "features/dangling.md" not in byname)
+            check("a directory symlink is not traversed",
+                  not any("subdir" in n for n in byname), ", ".join(byname))
+            if hasattr(os, "mkfifo"):
+                os.mkfifo(str(kb / "features" / "p.fifo"))
+                blob3, _ = ic._kb_bytes(kb)
+                names3 = {m.name for m in _tar.open(fileobj=_io.BytesIO(blob3)).getmembers()}
+                check("a fifo is skipped", not any(n.endswith(".fifo") for n in names3))
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

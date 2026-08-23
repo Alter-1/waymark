@@ -1487,17 +1487,31 @@ def _kb_bytes(path: Path) -> tuple:
     real mtimes every rebuild would produce a different archive and the backup directory would grow
     without bound on content that never changed.
 
-    Only regular files are taken, so a `.git` directory or an editor swap file cannot make an
-    unchanged KB look changed.
+    SYMLINKS ARE FOLLOWED AND STORED AS CONTENT, which is not the obvious choice, so: read_kb_dir()
+    reads entries with read_text(), which follows them. An entry symlinked into the KB is therefore
+    INDEXED, and a backup that did not contain it would not be a backup of what the engine reads.
+    Archiving the target's bytes under the in-KB name is the only form that matches.
+
+    It also closes a hole, more thoroughly than skipping would. tarfile defaults to
+    dereference=False, so the previous code emitted a SYMTYPE header carrying the link's ABSOLUTE
+    target -- `features/x.md -> /home/…/outside/secret.txt` -- and zero bytes of content. Restoring
+    that recreated a link pointing OUT of the KB tree while the entry itself was never saved.
+    With dereference=True no symlink entry is ever written, so no restore can place one.
+
+    Only regular files are taken -- a dangling link, a directory symlink, a fifo or a socket is
+    skipped -- and dotted paths are skipped too, so a `.git` directory or an editor swap file
+    cannot make an unchanged KB look changed.
     """
     if not path.is_dir():
         return path.read_bytes(), "json"
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
+    with tarfile.open(fileobj=buf, mode="w", dereference=True) as tar:
         for f in sorted(x for x in path.rglob("*") if x.is_file()):
             if any(part.startswith(".") for part in f.relative_to(path).parts):
                 continue
             info = tar.gettarinfo(str(f), arcname=str(f.relative_to(path)))
+            if not info.isreg():
+                continue        # a fifo, socket or device node has no content worth keeping
             info.mtime = 0
             info.uid = info.gid = 0
             info.uname = info.gname = ""
