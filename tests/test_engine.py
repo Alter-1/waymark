@@ -811,6 +811,74 @@ def main():
         check("and it is reported for review",
               "branch-scoped" in out, out.strip()[-200:])
 
+
+    # branch_scoped IS CHECKED, NOT MERELY BELIEVED, and it accepts the spelling it reports.
+    # Two residual risks raised in review: (a) the marker is trust-based, so a TYPO in the target
+    # wears a status meaning "not a problem" forever; (b) the author writes `branch_scoped` while
+    # the validator REPORTS `branch-scoped`, and copying the reported value back was silently inert.
+    with tempfile.TemporaryDirectory() as tdv:
+        rep = Path(tdv)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "Docs").mkdir()
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "Docs/source_index_annotations.json"}), encoding="utf-8")
+
+        def kb(status_word):
+            (rep / "Docs" / "source_index_annotations.json").write_text(json.dumps({
+                "schema": 2, "scope": "shared", "features": [
+                    {"name": "claims-elsewhere", "kind": "feature", "status": "n/a",
+                     "keywords": ["fixture"], "brief": "x",
+                     "see_also": [{"type": "symbol", "target": "lives_on_other_branch",
+                                   "status": status_word}]}]}), encoding="utf-8")
+
+        def status_of():
+            # READ THE CURRENT BRANCH'S INDEX, not whichever name sorts first. The planted
+            # siblings are snapshots taken before a rebuild, so reading one returns the PREVIOUS
+            # answer -- which is how the first version of this test "passed" the wrong way round.
+            import sqlite3 as _s
+            dbs = [d for d in (rep / ".tools").glob("code_index.*.sqlite")
+                   if not d.name.endswith(".tmp")
+                   and "sibling" not in d.name and "empty" not in d.name]
+            c = _s.connect(str(dbs[0]))
+            r = c.execute("SELECT status FROM kb_links WHERE origin='see_also'").fetchone()
+            c.close()
+            return r[0] if r else None
+
+        # 1. the symbol EXISTS here -> a sibling index is made from this build
+        (rep / "src" / "a.c").write_text("int lives_on_other_branch(void) { return 1; }\n", encoding="utf-8")
+        kb("branch_scoped")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        built = [d for d in (rep / ".tools").glob("code_index.*.sqlite") if not d.name.endswith(".tmp")][0]
+        sibling = built.with_name("code_index.sibling-branch.sqlite")
+        sibling.write_bytes(built.read_bytes())
+
+        # 2. remove it from THIS branch. The sibling still has it -> the claim is TRUE.
+        (rep / "src" / "a.c").write_text("int something_else(void) { return 2; }\n", encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("branch_scoped is CONFIRMED against a sibling branch index",
+              status_of() == "branch-scoped", "got %r" % status_of())
+
+        # 3. the reported spelling must work when copied back into the frontmatter
+        kb("branch-scoped")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("the hyphen spelling the validator REPORTS is accepted as input",
+              status_of() == "branch-scoped", "got %r" % status_of())
+
+        # 4. no sibling has it -> the claim is REFUTED, and a typo cannot hide behind the marker
+        sibling.unlink()
+        other = built.with_name("code_index.empty-branch.sqlite")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        built2 = [d for d in (rep / ".tools").glob("code_index.*.sqlite")
+                  if not d.name.endswith(".tmp") and "empty" not in d.name][0]
+        other.write_bytes(built2.read_bytes())        # a sibling that does NOT contain the symbol
+        kb("branch_scoped")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("a branch_scoped claim NO sibling supports is reported missing, not excused",
+              status_of() == "missing", "got %r -- a typo would hide here" % status_of())
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

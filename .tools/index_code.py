@@ -1581,6 +1581,12 @@ def default_annotation_paths() -> list[Path]:
 # (bug / open_bug / resolved_bug / resolved / open_issue) on the 43% of entries that carried a kind
 # at all, so "what is still open?" could only be answered from memory -- which is how a test image's
 # source got lost. `status` is now its own required field with a closed vocabulary.
+# ACCEPT BOTH SPELLINGS. The author writes `branch_scoped`; the validator REPORTS `branch-scoped`,
+# and copying a reported value back into the frontmatter is the obvious thing to do. Exact-matching
+# only the underscore made that silently inert -- the link kept its authored status and went back to
+# reading `missing`, with nothing to say why.
+BRANCH_SCOPED_SPELLINGS = {"branch_scoped", "branch-scoped", "branchscoped"}
+
 ANNOTATION_STATUSES = ("open", "resolved", "wontfix", "n/a")
 # HOW DO WE KNOW? Reading has been wrong four times on one bug in a single session -- available()
 # blamed for a path it never reaches, an inline UDP send blamed for a web-log symptom, and two
@@ -1970,7 +1976,52 @@ def resolve_link_candidates(con: sqlite3.Connection, target_type: str, target: s
     return _collapse_one_subject(candidates)
 
 
-def validate_kb_links(con: sqlite3.Connection) -> None:
+def sibling_branch_indexes(exclude: object = None) -> list:
+    """Other branches' indexes, for checking a claim this branch cannot see.
+
+    The KB is shared across branches and the index is per-branch, so `.tools/code_index.*.sqlite`
+    is a set of sibling views of the same source tree. That is the only evidence available for
+    deciding whether a symbol that is absent HERE exists somewhere else -- which is what a
+    branch_scoped link asserts.
+    """
+    out = []
+    try:
+        paths = sorted((REPO_ROOT / ".tools").glob("code_index.*.sqlite"))
+    except OSError:
+        return out
+    for path in paths:
+        if path.name.endswith(".tmp") or (exclude is not None and Path(path) == Path(exclude)):
+            continue
+        out.append(path)
+    return out
+
+
+def resolves_on_another_branch(target_type: str, target: str, exclude: object = None) -> object:
+    """True / False / None -- found elsewhere, refuted, or nothing to check against.
+
+    None is NOT the same as False. A fresh clone has one branch indexed and therefore no evidence
+    either way; refusing the claim there would make branch_scoped unusable exactly where it is most
+    needed. False means siblings WERE consulted and none of them has the target, which is the
+    interesting case: the claim is wrong, usually a typo in the name.
+    """
+    checked = 0
+    for path in sibling_branch_indexes(exclude):
+        try:
+            other = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            continue
+        try:
+            if resolve_link_candidates(other, target_type, target):
+                return True
+            checked += 1
+        except sqlite3.Error:
+            pass            # a half-written or older-schema sibling proves nothing
+        finally:
+            other.close()
+    return False if checked else None
+
+
+def validate_kb_links(con: sqlite3.Connection, self_db: object = None) -> None:
     rows = con.execute(
         "SELECT rowid, target_type, target, status, note FROM kb_links ORDER BY rowid"
     ).fetchall()
@@ -1992,7 +2043,7 @@ def validate_kb_links(con: sqlite3.Connection) -> None:
                 resolved_status = "ambiguous"
             elif candidates:
                 resolved_status = "ok"
-            elif authored == "branch_scoped":
+            elif authored in BRANCH_SCOPED_SPELLINGS:
                 # ONE KB, MANY BRANCHES, ONE INDEX PER BRANCH. A symbol link is validated against
                 # the branch that happens to be checked out, so a target living on only some of
                 # them reports `missing` on all the others -- forever, and correctly by its own
@@ -2004,7 +2055,14 @@ def validate_kb_links(con: sqlite3.Connection) -> None:
                 # above are tried first -- so it never hides a link that works here; it only
                 # changes what absence means. Confirm one with:
                 #     query_code_index.py symbol <name> --branches all
-                resolved_status = "branch-scoped"
+                # AND IT IS CHECKED, NOT MERELY BELIEVED. The claim is "this exists on another
+                # branch", and the sibling indexes are exactly the evidence for that. A typo in the
+                # target name would otherwise sit here forever wearing a status that means "not a
+                # problem" -- which is how a trusted marker becomes a way to hide real rot.
+                # Unverifiable (no sibling index yet) is NOT the same as refuted: a fresh clone has
+                # one branch indexed, and failing there would break the feature where it is needed.
+                elsewhere = resolves_on_another_branch(target_type, target, exclude=self_db)
+                resolved_status = "missing" if elsewhere is False else "branch-scoped"
             else:
                 resolved_status = "missing"
         chosen = candidates[0] if candidates else {}
@@ -2501,7 +2559,10 @@ def main() -> int:
     # After BOTH symbols and annotations exist: the link needs each side.
     link_annotations_to_symbols(con)
     link_commits(con)
-    validate_kb_links(con)
+    # EXCLUDE THIS BRANCH'S OWN index from the cross-branch check: a STALE copy of it from a
+    # previous run can still contain a symbol this build no longer has, which would confirm
+    # the claim using the very data being replaced.
+    validate_kb_links(con, self_db=real_db)
     validate_kb_relations(con)
     # Deleting is only safe when this run covered everything the lifecycle knows about.
     full_scan = sorted(args.roots) == sorted(DEFAULT_ROOTS)

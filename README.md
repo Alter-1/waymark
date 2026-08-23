@@ -129,8 +129,25 @@ Say so in the link:
 ```
 
 It still **resolves normally** where the target is present, so it never hides a link that works
-here; it only changes what *absence* means — `branch-scoped` instead of `missing`, reported for
-review and not counted as rot. An ordinary link to nothing is still a defect. Confirm one with:
+here; it only changes what *absence* means. An ordinary link to nothing is still a defect.
+
+**And the claim is checked, not merely believed.** `.tools/code_index.*.sqlite` is a set of sibling
+views of the same tree, so when the target is absent here the other branches' indexes are consulted:
+
+| what the siblings say | status |
+|---|---|
+| one of them has it | `branch-scoped` — confirmed, reported for review, not counted as rot |
+| none of them has it | **`missing`** — the claim is refuted, usually a typo in the name |
+| there are no siblings yet | `branch-scoped` — nothing to check against, so trust |
+
+That last row matters: a fresh clone has one branch indexed, and refusing the claim there would
+break the feature exactly where it is needed. *Unverifiable* is not the same as *refuted*. This
+branch's own index is excluded from the check — a stale copy of it could otherwise confirm a claim
+using the very data being replaced.
+
+Both spellings are accepted on input, `branch_scoped` and `branch-scoped`, because the validator
+*reports* the hyphenated one and copying a reported value back into the frontmatter is the obvious
+thing to do. Check a target by hand with:
 
 ```bash
 python3 .tools/query_code_index.py symbol <name> --branches all
