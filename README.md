@@ -38,6 +38,25 @@ Everything below runs against `sample/`, a small append-only key-value store inc
 repository, and its knowledge base in `Docs/source_index_annotations.json`. The examples are real:
 copy and paste them.
 
+**This repository uses waymark on itself**, which is also a working demonstration of the multi-root
+split described further down. `kb.config.json` names two knowledge bases:
+
+```json
+"annotations": ["Docs/source_index_annotations.json", "Docs/kb-engine"]
+```
+
+The first is the sample project's, so the examples stay clean. The second is `Docs/kb-engine/`,
+waymark's knowledge about *itself* — the bug classes, the compatibility floors, the traps that cost
+someone a day. They merge into one index and one search. Try:
+
+```bash
+python3 .tools/query_code_index.py --full annotation IsADirectoryError
+python3 .tools/query_code_index.py --full annotation walrus
+```
+
+If you are about to change the engine, read that KB first. It exists because the alternative is
+re-deriving the same four bugs.
+
 **Where does a knowledge base actually live?** It is a folder of markdown files, one per entry, and
 where that folder sits — beside your code, on a branch of its own, or in a separate repository — is
 your choice. If that is the question you came with, skip ahead to

@@ -1,0 +1,6 @@
+{
+ "schema": 2,
+ "scope": "shared",
+ "annotations": null,
+ "collections": ["concepts", "features"]
+}

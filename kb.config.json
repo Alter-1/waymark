@@ -1,7 +1,12 @@
 {
-  "_comment": "Project coupling for waymark. The engine ships neutral defaults; this file is what points it at a particular codebase. Keep project names, paths and dialects here, never in .tools/*.py.",
-  "roots": ["sample"],
-  "annotations": "Docs/source_index_annotations.json",
+  "_comment": "Project coupling for waymark. The engine ships neutral defaults; this file is what points it at a particular codebase. TWO KB ROOTS, and that is deliberate: the first is the SAMPLE project's knowledge base, which every example in the README runs against; the second is waymark's knowledge about ITSELF. They merge into one index and one search -- which also makes this repository a live demonstration of the multi-root split it documents. Keep project names, paths and dialects here, never in .tools/*.py.",
+  "roots": [
+    "sample"
+  ],
+  "annotations": [
+    "Docs/source_index_annotations.json",
+    "Docs/kb-engine"
+  ],
   "version_file": "sample/include/version.h",
   "api_regex": "(KV\\+[A-Za-z0-9_?=:+,.-]*|\\?[A-Za-z0-9_*][A-Za-z0-9_=&*.,+-]*)"
 }
