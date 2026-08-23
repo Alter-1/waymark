@@ -2463,7 +2463,10 @@ def main() -> int:
     if args.annotations:
         annotation_paths = [Path(p) for p in args.annotations]
     elif args.no_auto_annotations:
-        annotation_paths = [DEFAULT_ANNOTATIONS]
+        # THE FLAG IS ABOUT THE VERSION OVERLAY, not about the configured roots -- its own help says
+        # so. Dropping EXTRA_ANNOTATIONS here silently discarded the whole second KB of a
+        # public/local split, which is configuration the user wrote down, not something auto-detected.
+        annotation_paths = [DEFAULT_ANNOTATIONS] + list(EXTRA_ANNOTATIONS)
     else:
         annotation_paths = default_annotation_paths()
     branch = current_branch_name()

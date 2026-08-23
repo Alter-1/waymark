@@ -939,6 +939,44 @@ def main():
         run([str(rep / ".tools" / "index_code.py")], cwd=rep)
         check("a KB-only DELETE is picked up", count() == 1, "got %d" % count())
 
+
+    # add_note.py MUST WORK AGAINST A DIRECTORY KB. It read the KB with path.read_text(), so a split
+    # KB gave IsADirectoryError -- and this is the documented way to record a finding, so the primary
+    # WRITE path was broken for every KB that had been split. It also could not resolve an
+    # `annotations` LIST (TypeError) or a path with `~` in it.
+    with tempfile.TemporaryDirectory() as tdn2:
+        rep = Path(tdn2) / "repo"
+        (rep / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py", "add_note.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int widget_open(void){return 1;}\n", encoding="utf-8")
+        kbd = Path(tdn2) / "kb"
+        (kbd / "features").mkdir(parents=True)
+        (kbd / "kb.json").write_text(json.dumps(
+            {"schema": 2, "collections": ["features", "symbols"]}), encoding="utf-8")
+        # the LIST form, which used to be a TypeError before the path was even opened
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": [str(kbd), str(kbd) + "-local"]}), encoding="utf-8")
+
+        add = str(rep / ".tools" / "add_note.py")
+        rc, out, err = run([add, "widget_open", "fsync lands after the ack"],
+                           cwd=rep)
+        check("add_note accepts an annotations LIST and a directory KB",
+              rc == 0, (err or out).strip()[-160:])
+        written = sorted((kbd / "symbols").glob("*.md")) if (kbd / "symbols").is_dir() else []
+        check("it writes ONE entry file, not the whole KB", len(written) == 1,
+              [f.name for f in written])
+
+        rc, _, _ = run([add, "widget_open", "and a second, independent finding"], cwd=rep)
+        written = sorted((kbd / "symbols").glob("*.md"))
+        check("a second note on the same symbol does not overwrite the first",
+              len(written) == 2, [f.name for f in written])
+
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "notes", "widget_open"], cwd=rep)
+        check("and the notes come back out", "fsync lands after the ack" in out, out.strip()[:120])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

@@ -85,7 +85,16 @@ def annotation_path() -> Path:
     except (OSError, ValueError):
         cfg = {}
     rel = cfg.get("annotations") if isinstance(cfg, dict) else None
-    return REPO_ROOT / (rel or "Docs/source_index_annotations.json")
+    # `annotations` MAY BE A LIST -- a shared KB beside a local one -- and `REPO_ROOT / list` is a
+    # TypeError, which is what this tool did in every repo using the split. The FIRST root is the
+    # shared one by convention; --annotations picks another.
+    if isinstance(rel, list):
+        rel = rel[0] if rel else None
+    # AND IT MAY BE OUTSIDE THE REPO. `~/kb/project` under REPO_ROOT / becomes `<repo>/~/kb/project`,
+    # a directory that does not exist, so the tool reported "no annotation file" and pointed at a
+    # path with a literal tilde in it.
+    path = Path(str(rel or "Docs/source_index_annotations.json")).expanduser()
+    return path if path.is_absolute() else (REPO_ROOT / path)
 
 
 def guess_file(symbol: str) -> str:
@@ -109,6 +118,87 @@ def guess_file(symbol: str) -> str:
     return hits[0] if hits else ""
 
 
+def _engine():
+    """The indexer, imported for its frontmatter dialect.
+
+    The split format is deliberately strict -- anything the reader cannot parse is an error, never a
+    dropped field -- so a second, hand-rolled writer here would be a second definition of the format
+    waiting to disagree with the first. Import the one that already exists.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_wm_engine", Path(__file__).with_name("index_code.py"))
+    mod = importlib.util.module_from_spec(spec)
+    # REGISTER BEFORE EXECUTING. @dataclass resolves cls.__module__ through sys.modules while the
+    # class body is being processed, so a module that is not there yet dies with a bare
+    # "'NoneType' object has no attribute '__dict__'" that says nothing about the real cause.
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def add_note_to_dir(root, a):
+    """Record a symbol note into a DIRECTORY KB -- one markdown file per entry.
+
+    THIS WAS SIMPLY MISSING. add_note.py read the KB with path.read_text(), so against a directory
+    it died with IsADirectoryError -- and this is the documented way to record a finding, so the
+    primary write path was broken for every KB that had been split.
+
+    Only the ONE entry file is written, never the whole KB. That is the point of the split format:
+    two people recording two findings touch two files and cannot lose each other's work.
+    """
+    engine = _engine()
+    folder = root / "symbols"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    entry = {"name": a.symbol, "notes": a.note}
+    where = a.file or guess_file(a.symbol)
+    if where:
+        entry["file"] = where
+    if a.keywords:
+        entry["keywords"] = [k.strip() for k in a.keywords.split(",") if k.strip()]
+    if a.author:
+        entry["author"] = a.author
+    entry["ts"] = datetime.now().strftime("%d%m%y %H:%M")
+
+    with kb_lock(root):
+        existing = sorted(folder.glob("*.md"))
+        if a.replace:
+            dropped = 0
+            for f in existing:
+                try:
+                    item = engine.text_to_entry(f.read_text(encoding="utf-8"), str(f))
+                except Exception:
+                    continue        # not ours to judge; leave anything unparseable alone
+                if item.get("name") == a.symbol and str(item.get("author") or "") == a.author:
+                    f.unlink()
+                    dropped += 1
+            if dropped:
+                print("superseded %d earlier note(s)" % dropped)
+            existing = sorted(folder.glob("*.md"))
+
+        taken = set(f.stem for f in existing)
+        name = engine._entry_filename(entry, taken)
+        target = folder / (name + ".md")
+        # WRITE ASIDE, THEN RENAME, exactly as the single-file path does: a half-written entry left
+        # in the collection folder is indistinguishable from a real one to the next rebuild.
+        tmp = target.with_name("%s.%d.tmp" % (target.name, os.getpid()))
+        try:
+            with io.open(str(tmp), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(engine.entry_to_text(entry))
+            os.replace(str(tmp), str(target))
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+
+    print("noted %s%s -> %s" % (a.symbol, " (" + where + ")" if where else "",
+                                target.relative_to(root)))
+    print("now run: python3 .tools/index_code.py && python3 .tools/query_code_index.py selftest")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -127,6 +217,9 @@ def main() -> int:
         print("no annotation file at %s - create it or set 'annotations' in kb.config.json" % path,
               file=sys.stderr)
         return 1
+
+    if path.is_dir():
+        return add_note_to_dir(path, a)
 
     # ONE WRITER AT A TIME, across read AND write -- see kb_lock().
     with kb_lock(path):
