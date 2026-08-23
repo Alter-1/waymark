@@ -164,18 +164,20 @@ python3 .tools/index_code.py                # 3. build the index
 The filename is the entry's name. A small frontmatter block, then ordinary prose:
 
 ```markdown
---- kb/routes/uart0.md ---
+--- kb/routes/kv-put.md ---
 ---
-name: FBI UART0
-concept_id: fbi.channel.uart0
-destination: UART0
-protocol: raw/crsf/sbus/mavlink depending on per-port config
-file: Eth2Serial/Eth2Serial.h
+name: KV+PUT
+file: sample/cli/kvctl.py
+keywords:
+  - route
+  - write-path
+  - put
 ---
 
 ## notes
 
-Often regular UART; may be single-wire in special configurations.
+Client -> server write path: KvClient.put -> KV+PUT -> Store::put -> wal_append.
+The acknowledgement is sent only after the WAL accepts the record.
 ```
 
 Long explanations go in the **body**, below the frontmatter — there they diff like prose instead of

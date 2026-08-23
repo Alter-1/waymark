@@ -23,19 +23,19 @@ source.
 One entry is one markdown file. The filename is the entry name. A real one, complete:
 
 ```markdown
---- routes/FBI_UART0.md ---
+--- kb/routes/kv-put.md ---
 ---
-concept_id: fbi.channel.uart0
-destination: UART0
-file: Eth2Serial/Eth2Serial.h
-name: FBI UART0
-protocol: raw/crsf/sbus/mavlink depending on per-port config
-source: FBI UDP packet prefix d
+name: KV+PUT
+file: sample/cli/kvctl.py
+keywords:
+  - route
+  - write-path
+  - put
 ---
 
 ## notes
 
-Often regular UART; may be single-wire in special configurations.
+Client -> server write path: KvClient.put -> KV+PUT -> Store::put -> wal_append. The acknowledgement is sent only after the WAL accepts the record.
 ```
 
 Long prose belongs in the **body**, not in a frontmatter value: there it diffs like prose instead of
