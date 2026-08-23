@@ -386,6 +386,23 @@ Both are merged into one index and one search — only `git` tells them apart. S
 that over marking an entry private: a file merely *marked* local still sits in the tracked worktree,
 and one `git add` publishes it. A folder in no repository cannot be pushed by accident.
 
+Declare which is which in each root's `kb.json` (`"scope": "shared"` / `"local"`), and
+`add_note.py` will tell you where a finding went:
+
+```bash
+$ python3 .tools/add_note.py gadget "the FIFO drains before the ack"
+noted gadget -> /home/you/kb/project/symbols/gadget.md   [shared]
+  this KB is shared -- use --local for anything site-specific
+
+$ python3 .tools/add_note.py gadget "on THIS bench, io3 is jumpered to io7" --local
+noted gadget -> /home/you/kb/project.local/symbols/gadget.md   [local]
+```
+
+Naming the target matters because the default is the **shared** root, so every note is a
+publish-or-not decision — one that used to be taken silently. `--local` refuses rather than falling
+back when no second root is configured: a fallback there writes exactly the note that should not be
+published into exactly the place it should not go.
+
 When an entry has both, **split it** rather than hiding it whole — the general finding goes public
 where other people can use it, the values stay local, and the two cross-link. Most bench notes are
 90 % general; moving them wholesale would gut the shared KB of exactly the root-cause work it
