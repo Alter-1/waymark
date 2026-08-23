@@ -298,8 +298,8 @@ def main():
         (note / "kb.config.json").write_text(
             json.dumps({"annotations": "kb/ann.json", "roots": ["src"]}), encoding="utf-8")
 
-        add = str(note / ".tools" / "add_note.py")
-        rc, out, err = run([add, "widget_open", "Opens the widget.",
+        add_tool = str(note / ".tools" / "add_note.py")
+        rc, out, err = run([add_tool, "widget_open", "Opens the widget.",
                             "--keywords", "widget, open", "--author", "T"], cwd=note)
         check("add_note writes without error", rc == 0, err.strip()[-200:])
 
@@ -318,12 +318,12 @@ def main():
               str(syms[0].get("file") if syms else None))
 
         # Appending is the default: one symbol can carry several findings from several sessions.
-        run([add, "widget_open", "A second, later finding.", "--author", "T"], cwd=note)
+        run([add_tool, "widget_open", "A second, later finding.", "--author", "T"], cwd=note)
         ann = json.loads((note / "kb" / "ann.json").read_text(encoding="utf-8"))
         check("a second note APPENDS rather than overwriting",
               len(ann.get("symbols", [])) == 2, f"symbols={len(ann.get('symbols', []))}")
 
-        run([add, "widget_open", "The corrected finding.", "--author", "T", "--replace"], cwd=note)
+        run([add_tool, "widget_open", "The corrected finding.", "--author", "T", "--replace"], cwd=note)
         ann = json.loads((note / "kb" / "ann.json").read_text(encoding="utf-8"))
         kept = [x.get("notes") for x in ann.get("symbols", [])]
         check("--replace supersedes that author's earlier notes",
@@ -341,7 +341,23 @@ def main():
         check("being NAMED after a symbol is a declared link, not a guess",
               "declared" in out, out.strip()[-200:])
 
-        rc, _, err = run([add, "widget_open", "x", "--annotations",
+        # A NOTE LONGER THAN 400 CHARACTERS CAME BACK CUT, AND CUT SILENTLY. The notes query selected
+        # substr(json_extract(...), 1, 400), so the ceiling lived in the SQL and --full could not
+        # lift it. What the reader got was a note ending mid-sentence with nothing to say it had been
+        # shortened - indistinguishable from a note that was RECORDED incomplete, which is the one
+        # reading that makes someone go and re-derive the missing half. Truncation for display is
+        # brief_value's job, and brief_value marks what it drops.
+        long_note = ("The chain is A -> B -> C, and every hop matters. " * 14) + "TAIL_MARKER_KEPT."
+        run([add_tool, "widget_open", long_note, "--author", "T", "--replace"], cwd=note)
+        run([str(note / ".tools" / "index_code.py"), "--force"], cwd=note)
+        rc, out, _ = query("--full", "notes", "widget_open", cwd=note)
+        check("--full returns a note longer than 400 characters whole",
+              "TAIL_MARKER_KEPT." in out, "%d chars back, tail missing" % len(out))
+        rc, out, _ = query("notes", "widget_open", cwd=note)
+        check("and the brief form SAYS it shortened one, rather than cutting in silence",
+              "TAIL_MARKER_KEPT." not in out and "..." in out, out.strip()[-160:])
+
+        rc, _, err = run([add_tool, "widget_open", "x", "--annotations",
                           str(note / "kb" / "nope.json")], cwd=note)
         check("a missing annotation file is refused, not created blindly",
               rc != 0 and "nope.json" in err, err.strip()[-200:])
@@ -514,7 +530,13 @@ def main():
     # rebuild: 14 reads crashed, 1143 got an EMPTY table with NO error, 292 were correct. The crash
     # is the visible 1 %; the other 79 % answered "0 links, 0 broken, 0 annotations" confidently and
     # wrongly, which would let selftest report a clean pass mid-rebuild.
-    dbp = sorted(TOOLS.glob("code_index*.sqlite"))[0]
+    # THE INDEX IS PER-BRANCH, so .tools/ accumulates one database per branch ever built here. Taking
+    # the alphabetically first watched a database the rebuild never touches, and the inode then does
+    # not change for the most ordinary reason - reporting "the build is writing into the live
+    # database again" on a build that did exactly the right thing.
+    dbp = TOOLS / ("code_index.%s.sqlite" % _branch())
+    if not dbp.exists():
+        run([str(TOOLS / "index_code.py"), "--force"])
     before_ino = dbp.stat().st_ino
     run([str(TOOLS / "index_code.py"), "--force"])
     check("a rebuild REPLACES the index file rather than mutating it in place",

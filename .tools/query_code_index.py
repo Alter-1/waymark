@@ -893,7 +893,7 @@ def main() -> int:
                    sa.defs,
                    CASE WHEN sa.link='declared' THEN '' WHEN sa.defs>3 THEN 'AMBIGUOUS: '
                         || sa.defs || ' definitions of this name' ELSE '' END AS caveat,
-                   substr(json_extract(a.value,'$.notes'), 1, 400) AS notes
+                   json_extract(a.value,'$.notes') AS notes
             FROM symbol_annotations sa
             LEFT JOIN annotations a ON a.name = sa.annotation AND a.kind = sa.kind
             WHERE (CASE WHEN ?='1' THEN sa.symbol LIKE ? ELSE sa.symbol = ? END)
