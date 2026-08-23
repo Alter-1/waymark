@@ -757,6 +757,60 @@ def main():
                 names3 = {m.name for m in _tar.open(fileobj=_io.BytesIO(blob3)).getmembers()}
                 check("a fifo is skipped", not any(n.endswith(".fifo") for n in names3))
 
+
+    # ONE KB, MANY BRANCHES, ONE INDEX PER BRANCH. A symbol link is validated against whichever
+    # branch is checked out, so a target that exists on only some of them reports `missing` on all
+    # the others -- permanently, and correctly by its own logic. `status: branch_scoped` says "this
+    # lives on some branches, not all": it still RESOLVES where the target is present, and reports
+    # `branch-scoped` instead of `missing` where it is not, so the selftest stays honest instead of
+    # standing permanently red.
+    with tempfile.TemporaryDirectory() as tdb:
+        rep = Path(tdb)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int here_now(void) { return 1; }\n", encoding="utf-8")
+        (rep / "Docs").mkdir()
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "Docs/source_index_annotations.json"}), encoding="utf-8")
+        (rep / "Docs" / "source_index_annotations.json").write_text(json.dumps({
+            "schema": 2, "scope": "shared", "features": [
+                {"name": "scoped-present", "kind": "feature", "status": "n/a", "keywords": ["fixture"],
+                 "brief": "links to a symbol that IS on this branch",
+                 "see_also": [{"type": "symbol", "target": "here_now", "status": "branch_scoped"}]},
+                {"name": "scoped-absent", "kind": "feature", "status": "n/a", "keywords": ["fixture"],
+                 "brief": "links to a symbol that is NOT on this branch",
+                 "see_also": [{"type": "symbol", "target": "only_on_2_1", "status": "branch_scoped"}]},
+                {"name": "plain-absent", "kind": "feature", "status": "n/a", "keywords": ["fixture"],
+                 "brief": "an ordinary link to nothing -- must still be a defect",
+                 "see_also": [{"type": "symbol", "target": "nowhere_at_all"}]},
+            ]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("branch_scoped fixture indexes", rc == 0, err.strip()[-160:])
+
+        import sqlite3 as _sq          # module-level import is deliberately avoided here
+        db = list((rep / ".tools").glob("code_index.*.sqlite"))
+        con = _sq.connect(str(db[0])) if db else None
+        if con is None:
+            check("branch_scoped fixture produced an index", False, "no sqlite written")
+        else:
+            got = dict(con.execute(
+                "SELECT source_name, status FROM kb_links WHERE origin='see_also'"))
+            check("branch_scoped still RESOLVES where the target exists",
+                  got.get("scoped-present") == "ok", "got %r" % got.get("scoped-present"))
+            check("branch_scoped reports branch-scoped, not missing, where it does not",
+                  got.get("scoped-absent") == "branch-scoped", "got %r" % got.get("scoped-absent"))
+            check("an ORDINARY dead link is still missing",
+                  got.get("plain-absent") == "missing", "got %r" % got.get("plain-absent"))
+            con.close()
+
+        rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "selftest"], cwd=rep)
+        check("a branch-scoped link alone does not fail the selftest",
+              "1 declared links unresolved" in out, "the plain dead link should be the only one")
+        check("and it is reported for review",
+              "branch-scoped" in out, out.strip()[-200:])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

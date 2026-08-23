@@ -625,14 +625,20 @@ def main() -> int:
             loose = con.execute("SELECT count(*) FROM kb_links WHERE origin='inline' AND status IN "
                                 "('missing','ambiguous')").fetchone()[0]
             outside = con.execute("SELECT count(*) FROM kb_links WHERE status='external'").fetchone()[0]
+            elsewhere = con.execute("SELECT count(*) FROM kb_links "
+                                    "WHERE status='branch-scoped'").fetchone()[0]
         except sqlite3.Error:
             broken = con.execute("SELECT count(*) FROM kb_links WHERE status IN "
                                  "('missing','ambiguous')").fetchone()[0]
-            loose = outside = 0
+            loose = outside = elsewhere = 0
         chk("kb links resolve", broken == 0, f"{broken} declared links unresolved (see broken-links)")
         if outside:
             checks.append(("links to other stores", "n/a",
                            f"{outside} external -- another knowledge base, not this one"))
+        if elsewhere:
+            checks.append(("links to other branches", "n/a",
+                           f"{elsewhere} branch-scoped -- the target lives on another branch of "
+                           f"this repo; check with `symbol <name> --branches all`"))
         if loose:
             checks.append(("inline [[references]] resolve", "REVIEW",
                            f"{loose} point at nothing here -- forward references, renames, or "

@@ -115,6 +115,31 @@ A link may target `symbol:`, `constant:`, `annotation:`, `concept:`, `route:`, `
   `annotation:compaction` resolves to the entry holding the content instead of complaining that the
   name is ambiguous with its own concept.
 
+### When the target lives on another branch
+
+One KB, many branches, **one index per branch**. A `symbol:` link is validated against whatever is
+checked out, so a target that exists on only some branches reports `missing` on all the others —
+permanently, and correctly by its own logic. That is a false alarm standing in front of the real
+ones, which is how a link report stops being read.
+
+Say so in the link:
+
+```json
+"see_also": [{"type": "symbol", "target": "SingleWire::set_pins", "status": "branch_scoped"}]
+```
+
+It still **resolves normally** where the target is present, so it never hides a link that works
+here; it only changes what *absence* means — `branch-scoped` instead of `missing`, reported for
+review and not counted as rot. An ordinary link to nothing is still a defect. Confirm one with:
+
+```bash
+python3 .tools/query_code_index.py symbol <name> --branches all
+```
+
+Two other authored statuses exist for the cases this does not cover: `renamed` and `expired`. Reach
+for those when the target is genuinely gone everywhere — never delete a stale link silently, since
+the reference is itself a record that the thing once existed.
+
 ## Rebuilding
 
 ```bash

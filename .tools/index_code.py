@@ -1985,12 +1985,28 @@ def validate_kb_links(con: sqlite3.Connection) -> None:
             candidates = []
         else:
             candidates = resolve_link_candidates(con, target_type, target)
-            resolved_status = "missing" if not candidates else "ok"
             # AMBIGUOUS MEANS MORE THAN ONE CANDIDATE, not "candidates of different kinds". There
             # are 1055 duplicate name/kind groups in this tree, so `symbol:main` resolved silently
             # to whichever row came first. A link that cannot name one target is not resolved.
             if len(candidates) > 1:
                 resolved_status = "ambiguous"
+            elif candidates:
+                resolved_status = "ok"
+            elif authored == "branch_scoped":
+                # ONE KB, MANY BRANCHES, ONE INDEX PER BRANCH. A symbol link is validated against
+                # the branch that happens to be checked out, so a target living on only some of
+                # them reports `missing` on all the others -- forever, and correctly by its own
+                # logic. That is a PERMANENT FALSE ALARM in front of the real ones, which is the
+                # exact failure the `external` branch above exists to avoid.
+                #
+                # `status: branch_scoped` is the author saying "this exists on some branches, not
+                # all". It still RESOLVES normally where the target is present -- the two cases
+                # above are tried first -- so it never hides a link that works here; it only
+                # changes what absence means. Confirm one with:
+                #     query_code_index.py symbol <name> --branches all
+                resolved_status = "branch-scoped"
+            else:
+                resolved_status = "missing"
         chosen = candidates[0] if candidates else {}
         con.execute(
             """
