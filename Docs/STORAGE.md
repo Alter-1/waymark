@@ -12,7 +12,7 @@ reads the first two and does not care about the third; one line of `kb.config.js
 and that is the entire coupling.
 
 A fourth thing is not storage at all: `.tools/code_index.<branch>.sqlite` is **generated,
-per-branch and disposable**. Never commit it, never edit it, never treat a query result as the
+per-branch and disposable** — one index per branch, the same KB in each, a different source scan. Never commit it, never edit it, never treat a query result as the
 record. Delete it and nothing is lost — `index_code.py` rebuilds it from the KB plus a scan of your
 source.
 
@@ -99,7 +99,10 @@ and answers a different question.
 | `branch_overrides/` | `branch_overrides` | per-branch value overrides |
 
 `symbol_annotations` and `symbol_comments` are mostly **derived** from the source scan, which is why
-they dwarf the hand-written collections (11 198 against 270 in the project this came from).
+they dwarf the hand-written collections (11 690 against 274 in the project this came from) — and why
+they differ per branch, while `concepts` and `routes`, which come only from the shared KB, are
+identical everywhere. If you are comparing counts across rebuilds, make sure you are reading the
+index for the branch you are on; they sit side by side in `.tools/`.
 
 If `kb.json` is absent the engine treats every non-dotted subdirectory as a collection — which is
 why a dotted directory is not one, and why `.git` sitting beside the entry folders does not break it.
