@@ -78,6 +78,41 @@ def kb_lock(path: Path, timeout: float = 10.0):
             pass
 
 
+def annotation_roots() -> list:
+    """Every configured KB root, in order. The FIRST is the default target.
+
+    `annotations` may name several -- typically a SHARED knowledge base and a LOCAL one that is in
+    no repository at all. Which one a finding lands in is a publish-or-not decision, so the tool
+    has to be able to name them rather than silently taking the first.
+    """
+    try:
+        cfg = json.loads((REPO_ROOT / "kb.config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    rel = cfg.get("annotations") if isinstance(cfg, dict) else None
+    if isinstance(rel, str):
+        rel = [rel]
+    if not rel:
+        rel = ["Docs/source_index_annotations.json"]
+    out = []
+    for one in rel:
+        q = Path(str(one)).expanduser()
+        out.append(q if q.is_absolute() else (REPO_ROOT / q))
+    return out
+
+
+def kb_scope(root: Path) -> str:
+    """What the KB says about itself: 'shared', 'local', or '' when it does not say.
+
+    kb.json carries a `scope` field that nothing read until now. It is the only thing that can tell
+    a reader whether the note they just wrote is about to be pushed.
+    """
+    try:
+        return str(json.loads((root / "kb.json").read_text(encoding="utf-8")).get("scope") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def annotation_path() -> Path:
     """Resolve the annotation file the same way index_code.py does - kb.config.json or the default."""
     try:
@@ -193,8 +228,12 @@ def add_note_to_dir(root, a):
                 pass
             raise
 
-    print("noted %s%s -> %s" % (a.symbol, " (" + where + ")" if where else "",
-                                target.relative_to(root)))
+    scope = kb_scope(root)
+    print("noted %s%s -> %s%s" % (a.symbol, " (" + where + ")" if where else "",
+                                  target, "   [%s]" % scope if scope else ""))
+    if scope != "local" and len(annotation_roots()) > 1:
+        print("  this KB is %s -- use --local for anything site-specific"
+              % (scope or "the default root"))
     print("now run: python3 .tools/index_code.py && python3 .tools/query_code_index.py selftest")
     return 0
 
@@ -209,10 +248,25 @@ def main() -> int:
     ap.add_argument("--author", default="", help="author tag recorded with the note")
     ap.add_argument("--replace", action="store_true",
                     help="supersede this author's existing note for the symbol instead of appending")
-    ap.add_argument("--annotations", default="", help="override the annotation file")
+    ap.add_argument("--annotations", default="", help="override the annotation file or KB directory")
+    ap.add_argument("--local", action="store_true",
+                    help="write to the LOCAL KB (the second configured root) instead of the shared one")
     a = ap.parse_args()
 
-    path = Path(a.annotations) if a.annotations else annotation_path()
+    roots = annotation_roots()
+    if a.annotations:
+        path = Path(a.annotations).expanduser()
+    elif a.local:
+        # SITE-SPECIFIC FINDINGS MUST BE EASY TO PUT SOMEWHERE THAT CANNOT BE PUSHED. If the only
+        # way to reach the local KB is remembering a path, the default wins and the value ends up
+        # in the shared one -- which is how a passphrase reaches a remote.
+        if len(roots) < 2:
+            print("--local needs a second KB root in kb.config.json's \"annotations\" list",
+                  file=sys.stderr)
+            return 1
+        path = roots[1]
+    else:
+        path = roots[0]
     if not path.exists():
         print("no annotation file at %s - create it or set 'annotations' in kb.config.json" % path,
               file=sys.stderr)
@@ -274,8 +328,10 @@ def main() -> int:
                 pass
             raise
 
-    print("noted %s%s (%d symbol annotations)"
-          % (a.symbol, " -> " + where if where else "", len(syms)))
+    scope = kb_scope(path.parent if path.is_file() else path)
+    print("noted %s%s (%d symbol annotations) in %s%s"
+          % (a.symbol, " -> " + where if where else "", len(syms), path,
+             "   [%s]" % scope if scope else ""))
     print("now run: python3 .tools/index_code.py && python3 .tools/query_code_index.py selftest")
     return 0
 

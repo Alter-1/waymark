@@ -999,6 +999,47 @@ def main():
         rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "notes", "widget_open"], cwd=rep)
         check("and the notes come back out", "fsync lands after the ack" in out, out.strip()[:120])
 
+
+    # WHICH KB A FINDING LANDS IN IS A PUBLISH-OR-NOT DECISION. With a shared root and a local one
+    # configured, add_note silently took the first -- so a note containing something site-specific
+    # went to the KB that gets pushed, and the output named a path relative to a root it never
+    # mentioned. Now it names the target and its declared scope, and --local reaches the other one.
+    with tempfile.TemporaryDirectory() as tds:
+        rep = Path(tds) / "repo"
+        (rep / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py", "add_note.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int gadget(void){return 1;}\n", encoding="utf-8")
+        shared, local = Path(tds) / "kb", Path(tds) / "kb-local"
+        for d, scope in ((shared, "shared"), (local, "local")):
+            (d / "features").mkdir(parents=True)
+            (d / "kb.json").write_text(json.dumps(
+                {"schema": 2, "scope": scope, "collections": ["features", "symbols"]}),
+                encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": [str(shared), str(local)]}), encoding="utf-8")
+        add = str(rep / ".tools" / "add_note.py")
+
+        rc, out, _ = run([add, "gadget", "goes to the shared one by default"], cwd=rep)
+        check("a note defaults to the FIRST root", (shared / "symbols" / "gadget.md").exists(), out[:120])
+        check("and the output names that KB and its scope",
+              str(shared) in out and "shared" in out, out.strip()[:160])
+        check("and points at --local for site-specific findings", "--local" in out, out.strip()[:160])
+
+        rc, out, _ = run([add, "gadget", "this one is site-specific", "--local"], cwd=rep)
+        check("--local writes to the SECOND root",
+              (local / "symbols" / "gadget.md").exists(), out[:120])
+        check("and does not nag about being shared",
+              "use --local" not in out, out.strip()[:160])
+
+        # one root configured: --local must refuse rather than silently use the shared one
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": str(shared)}), encoding="utf-8")
+        rc, out, err = run([add, "gadget", "nowhere to put it", "--local"], cwd=rep)
+        check("--local REFUSES when there is no second root, rather than falling back",
+              rc == 1, "rc=%s %s" % (rc, (err or out).strip()[:100]))
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
