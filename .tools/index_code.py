@@ -12,6 +12,8 @@ import argparse
 import atexit
 import gzip
 import hashlib
+import tarfile
+import io
 import json
 import os
 import re
@@ -1477,13 +1479,47 @@ def normalize_version(version: str) -> str:
     return version.replace(".", "_").replace("-", "_")
 
 
+def _kb_bytes(path: Path) -> tuple:
+    """The KB's content as bytes, whether it is one file or a directory of entries.
+
+    A directory becomes a TAR built deterministically -- sorted paths, and mtime/uid/gid/uname
+    zeroed -- because the digest is what decides whether this content is already backed up. With
+    real mtimes every rebuild would produce a different archive and the backup directory would grow
+    without bound on content that never changed.
+
+    Only regular files are taken, so a `.git` directory or an editor swap file cannot make an
+    unchanged KB look changed.
+    """
+    if not path.is_dir():
+        return path.read_bytes(), "json"
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for f in sorted(x for x in path.rglob("*") if x.is_file()):
+            if any(part.startswith(".") for part in f.relative_to(path).parts):
+                continue
+            info = tar.gettarinfo(str(f), arcname=str(f.relative_to(path)))
+            info.mtime = 0
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            with f.open("rb") as fh:
+                tar.addfile(info, fh)
+    return buf.getvalue(), "tar"
+
+
 def snapshot_annotations(paths: list[Path]) -> None:
     """Keep a gzipped copy of every annotation file this run read.
 
-    The KB is the one artefact here that is NOT in git: local, untracked, shared by every branch,
-    and authored by hand over months. A rebuild against a missing or truncated file produces an
-    EMPTY index WITHOUT erroring, which is the failure that looks most like success -- so the only
-    thing between a stray edit and a year of recorded knowledge is a copy taken before the fact.
+    A KB may be in no repository at all -- authored by hand over months, shared by every branch,
+    and in the local half of a public/local split, deliberately outside git. A rebuild against a
+    missing or truncated KB produces an EMPTY index WITHOUT erroring, which is the failure that
+    looks most like success -- so the only thing between a stray edit and a year of recorded
+    knowledge is a copy taken before the fact.
+
+    THIS SILENTLY STOPPED WORKING WHEN KBs BECAME DIRECTORIES. read_bytes() on a directory raises
+    IsADirectoryError, which the loop below treats as "an absent version overlay, that is normal"
+    and skips -- so the split form, the form MEANT to be hand-edited, was the one form with no
+    backup. A directory is snapshotted as a deterministic tar instead: same content, same digest,
+    so the one-snapshot-per-distinct-content rule still holds.
 
     One snapshot per distinct CONTENT, not per run. Rebuilds here are constant and casual, and a
     backup directory that grows on every invocation is one nobody reads and nobody prunes. Writing
@@ -1491,20 +1527,20 @@ def snapshot_annotations(paths: list[Path]) -> None:
     """
     for path in paths:
         try:
-            raw = path.read_bytes()
+            raw, ext = _kb_bytes(path)
         except OSError:
             continue        # a version overlay that is not present is normal, not an error
         stem = path.name[: -len(".json")] if path.name.endswith(".json") else path.name
         digest = hashlib.sha256(raw).hexdigest()[:16]
         try:
             KB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            if any(KB_BACKUP_DIR.glob(f"{stem}.*.{digest}.json.gz")):
+            if any(KB_BACKUP_DIR.glob(f"{stem}.*.{digest}.{ext}.gz")):
                 continue    # this exact content is already kept
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            with gzip.open(KB_BACKUP_DIR / f"{stem}.{stamp}.{digest}.json.gz", "wb") as fh:
+            with gzip.open(KB_BACKUP_DIR / f"{stem}.{stamp}.{digest}.{ext}.gz", "wb") as fh:
                 fh.write(raw)
             # the stamp leads the digest, so a plain name sort is chronological
-            for stale in sorted(KB_BACKUP_DIR.glob(f"{stem}.*.json.gz"))[:-KB_BACKUP_KEEP]:
+            for stale in sorted(KB_BACKUP_DIR.glob(f"{stem}.*.{ext}.gz"))[:-KB_BACKUP_KEEP]:
                 stale.unlink()
         except OSError as exc:
             print(f"kb-backup: {path.name}: {exc}", file=sys.stderr)

@@ -685,6 +685,39 @@ def main():
     check(f"the engine parses under Python {PY_FLOOR_STR}, the oldest host it runs on",
           not too_new, "; ".join(too_new[:4]))
 
+
+    # A DIRECTORY KB MUST BE BACKED UP TOO. read_bytes() raises IsADirectoryError on a directory,
+    # and the caller swallows OSError as "an absent version overlay is normal" -- so the split
+    # form, the one meant to be hand-edited, silently had NO backup from the day it was introduced.
+    # The snapshot is described in its own docstring as the only thing between a stray edit and a
+    # year of recorded knowledge, so it gets a test rather than another reading of the code.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ic_mod", ROOT / ".tools" / "index_code.py")
+    ic = importlib.util.module_from_spec(spec)
+    sys.modules["ic_mod"] = ic
+    spec.loader.exec_module(ic)
+    with tempfile.TemporaryDirectory() as td:
+        kb = Path(td) / "kb"
+        (kb / "features").mkdir(parents=True)
+        (kb / "features" / "a.md").write_text("---\nname: a\nkind: feature\n---\n\n## brief\n\nx\n",
+                                              encoding="utf-8")
+        (kb / ".git").mkdir()
+        (kb / ".git" / "HEAD").write_text("ref: refs/heads/kb\n", encoding="utf-8")
+        blob, ext = ic._kb_bytes(kb)
+        check("a directory KB yields bytes to back up", bool(blob) and ext == "tar",
+              "ext=%s len=%d" % (ext, len(blob)))
+        again, _ = ic._kb_bytes(kb)
+        check("and the same content digests the same twice", blob == again,
+              "non-deterministic tar would grow the backup dir on every rebuild")
+        import io as _io, tarfile as _tar
+        names = _tar.open(fileobj=_io.BytesIO(blob)).getnames()
+        check("dotted paths stay out of the snapshot",
+              not any(n.startswith(".") for n in names), ", ".join(names))
+        (kb / "features" / "a.md").write_text("---\nname: a\nkind: feature\n---\n\n## brief\n\nY\n",
+                                              encoding="utf-8")
+        changed, _ = ic._kb_bytes(kb)
+        check("an edited entry changes the digest", changed != blob)
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
