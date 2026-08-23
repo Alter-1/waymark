@@ -140,9 +140,13 @@ restore an old timestamp. `--force` is the answer to that, rather than making ev
 
 ## The KB on disk
 
-A KB can be one JSON document, or a **directory with one file per entry** — the engine reads both,
-and `annotations` in `kb.config.json` may name several, so a project's own notes can sit beside a
-shared one (`["kb/", "~/kb/esp-idf/"]`).
+Three separate things, and conflating them is the usual source of confusion: **what one entry
+looks like**, **how the directory is arranged**, and **where that directory lives**. `Docs/STORAGE.md`
+lays all three out with a worked example — read that if you are adopting this on your own project.
+
+The short version: a KB can be one JSON document, or a **directory with one file per entry** — the
+engine reads both, and `annotations` in `kb.config.json` may name several, so a project's own notes
+can sit beside a shared one (`["kb/", "~/kb/esp-idf/"]`).
 
 ```bash
 python3 .tools/kb_split.py Docs/source_index_annotations.json Docs/kb
@@ -293,10 +297,22 @@ deliberately not a compiler.
 
 ## Keeping your notes private
 
-The engine is separate from what you write with it. In the project this was extracted from, the
-annotation file is gitignored and shared across branches as local knowledge, while the tools are
-tracked. Both arrangements work; the KB in *this* repository is committed because it documents the
-sample.
+The engine is separate from what you write with it, and where your KB lives is your call —
+gitignored beside the code, an orphan branch in the same repository, or its own repo. All three
+work; `Docs/STORAGE.md` compares them. The KB in *this* repository is committed because it
+documents the sample.
+
+For anything you intend to share, split the KB rather than redacting it. `annotations` takes a
+list, so a pushed root can sit beside a local one that is in no repository at all:
+
+```json
+"annotations": ["~/kb/myproject", "~/kb/myproject.local"]
+```
+
+Site-specific material — bench addresses, home network details, customer particulars — goes in the
+local root. Prefer that over marking an entry private: a file merely *marked* local still sits in
+the tracked worktree, and one `git add` publishes it. A directory that belongs to no repository
+cannot be pushed by accident.
 
 Backups are automatic: every run keeps a gzipped copy of each annotation file it read under
 `.tools/kb-backups/`, one per distinct content, sixty retained. The file is hand-written over
