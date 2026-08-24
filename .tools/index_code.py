@@ -248,6 +248,69 @@ def kb_state(paths: list) -> list:
     return out
 
 
+PERSISTENT_TABLES = ("symbol_lifecycle", "symbol_metadata", "branch_symbols")
+
+
+def carry_persistent_tables(old_db, con) -> str:
+    """Copy the history tables from the previous index into a freshly-built one.
+
+    THREE TABLES ARE NOT DERIVED FROM THE SOURCE and cannot be rebuilt: symbol_lifecycle (when each
+    token appeared and disappeared), branch_symbols, and symbol_metadata -- which is HAND-WRITTEN,
+    and which the documentation invites people to edit.
+
+    They are deliberately excluded from the DROP list so a rebuild keeps them. That was not enough.
+    The atomic publish builds into a fresh <db>.<pid>.tmp and os.replace()s it over the real file,
+    and only the INCREMENTAL path seeded that scratch file from the existing index. On a FULL
+    rebuild -- `--force`, a schema bump, any first build after one -- the scratch file started
+    empty, so the rename threw the history away. Silently: the build printed its usual counts.
+
+    Measured: an INDEX_SCHEMA_VERSION bump reset 15099 lifecycle rows to `added_at = today`, which
+    destroys the only thing that table is for -- knowing when something appeared or vanished.
+
+    Best-effort by design. A schema bump can change these tables' own columns, so the copy uses the
+    INTERSECTION of old and new column names and reports rather than fails: losing history is bad,
+    failing a build over it is worse.
+    """
+    if not Path(old_db).exists():
+        return ""
+    moved, notes = [], []
+    try:
+        con.execute("ATTACH DATABASE ? AS prev", (str(old_db),))
+    except sqlite3.Error as exc:
+        return "could not read the previous index (%s)" % exc
+    try:
+        for table in PERSISTENT_TABLES:
+            try:
+                new_cols = [r[1] for r in con.execute("PRAGMA table_info(%s)" % table)]
+                old_cols = [r[1] for r in con.execute("PRAGMA prev.table_info(%s)" % table)]
+            except sqlite3.Error:
+                continue
+            shared = [c for c in new_cols if c in old_cols]
+            if not shared:
+                continue
+            cols = ",".join(shared)
+            try:
+                n = con.execute("SELECT count(*) FROM prev.%s" % table).fetchone()[0]
+                if not n:
+                    continue
+                con.execute("INSERT OR REPLACE INTO %s(%s) SELECT %s FROM prev.%s"
+                            % (table, cols, cols, table))
+                moved.append("%s %d" % (table, n))
+                if len(shared) != len(new_cols):
+                    notes.append("%s kept %d/%d columns" % (table, len(shared), len(new_cols)))
+            except sqlite3.Error as exc:
+                notes.append("%s: %s" % (table, exc))
+    finally:
+        try:
+            con.execute("DETACH DATABASE prev")
+        except sqlite3.Error:
+            pass
+    out = ", ".join(moved)
+    if notes:
+        out += " (" + "; ".join(notes) + ")"
+    return out
+
+
 def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_digest: str) -> bool:
     try:
         return (
@@ -2558,8 +2621,13 @@ def main() -> int:
     atexit.register(_discard_build_db)
     con = connect(build_db)
 
+    carried = ""
     if plan is None:
         init_db(con)
+        # THE SCRATCH FILE IS EMPTY ON A FULL REBUILD, so the history tables have to be brought
+        # across explicitly -- excluding them from the DROP list only protects them from being
+        # dropped, not from being left behind by the rename. See carry_persistent_tables().
+        carried = carry_persistent_tables(real_db, con)
         rescan_paths, gone = None, []
     else:
         rescan_paths, gone = plan
@@ -2632,6 +2700,8 @@ def main() -> int:
     # between 13 s and 2 s, and if incremental ever silently stops engaging, this is the line that
     # shows it -- a build that quietly went back to doing everything looks exactly like a slow day.
     stats["scan"] = "full" if plan is None else "incremental"
+    if carried:
+        stats["carried_history"] = carried
     if plan is not None:
         stats["rescanned"] = len(todo)
         stats["dropped"] = len(gone)

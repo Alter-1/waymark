@@ -1080,6 +1080,49 @@ def main():
         check("and the revival condition is shown, not just stored",
               "allocator stops serialising" in out, out.strip()[:160])
 
+
+    # HISTORY MUST SURVIVE A FULL REBUILD. symbol_lifecycle, symbol_metadata and branch_symbols are
+    # NOT derived from the source and cannot be rebuilt -- symbol_metadata is hand-written, and the
+    # docs invite editing it. They are excluded from the DROP list so a rebuild keeps them, and that
+    # was not enough: the atomic publish builds into a fresh .tmp and renames it over the real file,
+    # and only the INCREMENTAL path seeded that scratch from the existing index. A --force, a schema
+    # bump, or any first build after one therefore threw the history away, SILENTLY -- the build
+    # printed its usual counts. Measured on a real index: a schema bump reset 15099 lifecycle rows
+    # to added_at = today.
+    with tempfile.TemporaryDirectory() as tdh:
+        rep = Path(tdh)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int keeper(void){return 1;}\n", encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        if not dbs:
+            check("history fixture builds", False, "no index")
+        else:
+            import sqlite3 as _s
+            db = dbs[0]
+            con = _s.connect(str(db))
+            con.execute("UPDATE symbol_lifecycle SET added_at='2020-01-01T00:00:00+00:00'")
+            con.execute("INSERT OR REPLACE INTO symbol_metadata(symbol_key, notes) "
+                        "VALUES('handwritten', 'a note nobody can regenerate')")
+            con.commit(); con.close()
+
+            rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+            check("a forced rebuild succeeds", rc == 0, err.strip()[-140:])
+            con = _s.connect(str(db))
+            old = con.execute("SELECT count(*) FROM symbol_lifecycle "
+                              "WHERE added_at LIKE '2020-%'").fetchone()[0]
+            note = con.execute("SELECT count(*) FROM symbol_metadata "
+                               "WHERE symbol_key='handwritten'").fetchone()[0]
+            con.close()
+            check("symbol_lifecycle history survives --force", old > 0,
+                  "added_at was reset -- the scratch db was published without the history")
+            check("hand-written symbol_metadata survives --force", note == 1,
+                  "a note nobody can regenerate was destroyed by a rebuild")
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
