@@ -219,6 +219,27 @@ recoverable; a finished one nobody can find or trust is not.
 **Correct the record when it turns out wrong.** Two entries here asserted the opposite of the truth
 for weeks. A knowledge base nobody trusts is worse than none.
 
+**Audit your open claims, because nothing closes them for you.** A claim is written where the *work*
+is and resolved where the *evidence* lands, and those are usually different places — often a
+different entry, sometimes a different branch. Nothing walks back.
+
+```bash
+python3 .tools/query_code_index.py claim --status open --until <a-few-weeks-ago>
+```
+
+**Claims of absence rot fastest.** "Has NOT been given the guard", "NEITHER measured", "a SECOND,
+UNFIXED copy" — any work at all makes those false, and nothing points back to say so. Three such
+claims were found by hand here in one sweep, one of them wrong for two days while its own entry
+documented the opposite, and one for four days because the measurement that settled it was recorded
+elsewhere. **An open item that is actually finished is worse than none: it is a standing invitation
+to redo work already done.**
+
+Two things that are *not* signals, measured rather than assumed: an open claim on a `resolved` entry
+means nothing (every one of the fourteen legitimate open claims here sits on a resolved entry —
+entry status and claim status are orthogonal), and age alone is not a defect either. Most open
+claims are honestly open: predictions awaiting a rig, competing explanations, and warnings that
+exist to stop themselves being cited as proof. The audit is a *review*, not a check that can fail.
+
 **Use your own tool.** The knowledge about the thing you are building belongs in the knowledge base
 you are building it with. Asked whether waymark was used on waymark, the honest answer was no — its
 own hard-won facts were in commit messages and in a different project's private notes, where no user

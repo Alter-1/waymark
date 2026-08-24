@@ -9,9 +9,17 @@ next action depends on what was already ruled out.
 ## Order
 
 1. Record durable facts in the KB first.
-2. Rebuild the index.
-3. Run `selftest`.
-4. Write the handover note.
+2. **Close what is finished.** `query_code_index.py claim --status open --until <a-few-weeks-ago>`
+   — a claim is written where the work is and resolved where the evidence lands, which is usually a
+   different place, and nothing walks back to close it. An item can sit open for days after being
+   done and send the next session to redo it. Claims of *absence* ("not yet measured", "still
+   unfixed") rot fastest, because any work at all makes them false.
+3. Rebuild the index.
+4. Run `selftest`.
+5. Write the handover note.
+
+**And hold the handover note to the same standard.** Its open list rots exactly like a claim does:
+one item here read "still never done" for three days after the run it named had passed.
 
 Do not write only a free-form handover when the information belongs in the KB. A handover is easy to
 lose; a queryable claim with keywords is the durable record.

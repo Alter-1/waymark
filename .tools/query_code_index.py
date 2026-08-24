@@ -429,6 +429,10 @@ def main() -> int:
     p.add_argument("--since", default="",
                    help="only claims dated on or after this (YYYY-MM-DD) -- what a session "
                         "concluded, without reading a handover to find out")
+    p.add_argument("--until", default="",
+                   help="only claims dated on or before this (YYYY-MM-DD) -- with "
+                        "--status open, what has been asserted for a while and may have "
+                        "been overtaken")
     p.add_argument("--limit", type=int, default=80)
 
     p = sub.add_parser("param")
@@ -727,6 +731,13 @@ def main() -> int:
               -- string compare is correct for ISO dates. A claim with NO date is EXCLUDED rather
               -- than treated as ancient: undated means unknown, not old.
               AND (:since = '' OR (dated <> '' AND dated >= :since))
+              -- --until is the mirror, and it is the REVIEW direction. `--status open --until X`
+              -- answers "what has been open a while", the question that catches a claim the
+              -- world has moved past. Three were found by hand on 2026-08-23, each asserting an
+              -- ABSENCE -- "has NOT been given the guard", "NEITHER measured", "a SECOND,
+              -- UNFIXED copy" -- that later work had quietly made false. Claims of absence rot
+              -- fastest: any work makes them wrong, and nothing points back to close them.
+              AND (:until = '' OR (dated <> '' AND dated <= :until))
             ORDER BY CASE status WHEN 'dead' THEN :deadrank
                                  WHEN 'open' THEN 1 WHEN 'live' THEN 2 ELSE 3 END,
                      CASE evidence WHEN 'measured' THEN 0 WHEN 'reported' THEN 1 ELSE 2 END,
@@ -734,7 +745,7 @@ def main() -> int:
             LIMIT :lim
             """,
             {"t": args.term, "frag": f"%{args.term}%", "st": args.status.lower(),
-             "ev": args.evidence.lower(), "since": args.since, "lim": args.limit + 1,
+             "ev": args.evidence.lower(), "since": args.since, "until": args.until, "lim": args.limit + 1,
              "deadrank": 0 if args.dead_first else 9},
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)
