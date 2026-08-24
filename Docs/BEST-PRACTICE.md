@@ -210,6 +210,38 @@ what went wrong finds what fixed it. Nobody searches for the cause; they do not 
 **Record the dead ends.** "Tested and refuted" is often worth more than the answer, because without
 it the next person spends the same days. Say what was measured versus what was reasoned.
 
+**And never trust a dead end completely, because a dead end dies in a CONTEXT.** A toolchain, a
+board revision, a library version or the shape of the data can move, and a refutation quietly stops
+holding while the entry still reads *refuted*. So record what the death DEPENDED on, not only what
+killed it:
+
+```json
+{"status": "dead", "text": "the fast path cannot work",
+ "killed_by": "measured 3x slower",
+ "revive_if": "the allocator stops serialising -- retest on any toolchain bump"}
+```
+
+`killed_by` is the past; `revive_if` is the dependency. When the environment moves, that field is
+what makes the question answerable at all:
+
+```bash
+python3 .tools/query_code_index.py claim --revivable
+```
+
+Measured on a real KB before this existed: **21 dead claims, 19 recording what killed them, zero
+recording what the death depended on.** Nothing could answer "which of these should I recheck?"
+
+**When a dead end does revive, add a claim — never edit the old one.** Keep both halves:
+
+* *it was impossible because …* — the original claim, its `killed_by`, and its date
+* *it became possible because …* — a new claim naming the change that opened the way
+
+The pair is worth more than either half, because it names **the constraint that moved** — and that
+constraint is usually load-bearing somewhere else too. Overwriting the corpse destroys exactly the
+part a future reader needs to judge whether the same thing has moved again. The same pair belongs in
+a comment at the code site when the change lands: the person who next reads that line will not be
+querying a knowledge base.
+
 **Say OPEN when it is open.** One honest "here is what I know and what would settle it" beats a tidy
 summary that hides the uncertainty — a summary that is trusted and wrong costs more than no summary.
 

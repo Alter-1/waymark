@@ -429,6 +429,10 @@ def main() -> int:
     p.add_argument("--since", default="",
                    help="only claims dated on or after this (YYYY-MM-DD) -- what a session "
                         "concluded, without reading a handover to find out")
+    p.add_argument("--revivable", action="store_true",
+                   help="only claims that record what would make them true "
+                        "again -- run this when the environment moves, because "
+                        "a dead end dies in a CONTEXT")
     p.add_argument("--until", default="",
                    help="only claims dated on or before this (YYYY-MM-DD) -- with "
                         "--status open, what has been asserted for a while and may have "
@@ -723,7 +727,7 @@ def main() -> int:
         # notes blob nobody reads, in which live and killed claims read identically.
         cur = con.execute(
             """
-            SELECT status, evidence, entry, text, dated, killed_by
+            SELECT status, evidence, entry, text, dated, killed_by, revive_if
             FROM claims
             WHERE (:t = '' OR text LIKE :frag OR entry LIKE :frag)
               AND (:st = '' OR status = :st)
@@ -738,6 +742,12 @@ def main() -> int:
               -- UNFIXED copy" -- that later work had quietly made false. Claims of absence rot
               -- fastest: any work makes them wrong, and nothing points back to close them.
               AND (:until = '' OR (dated <> '' AND dated <= :until))
+              -- A DEAD END DIES IN A CONTEXT. killed_by records what disproved a claim and
+              -- says nothing about whether the disproof still applies. When a toolchain, a
+              -- board revision or a data shape moves, some refutations quietly stop holding
+              -- while the entry still reads 'refuted'. This asks the only useful question at
+              -- that moment: which of them told us what they depended on?
+              AND (:revivable = '' OR revive_if <> '')
             ORDER BY CASE status WHEN 'dead' THEN :deadrank
                                  WHEN 'open' THEN 1 WHEN 'live' THEN 2 ELSE 3 END,
                      CASE evidence WHEN 'measured' THEN 0 WHEN 'reported' THEN 1 ELSE 2 END,
@@ -746,6 +756,7 @@ def main() -> int:
             """,
             {"t": args.term, "frag": f"%{args.term}%", "st": args.status.lower(),
              "ev": args.evidence.lower(), "since": args.since, "until": args.until, "lim": args.limit + 1,
+             "revivable": "1" if args.revivable else "",
              "deadrank": 0 if args.dead_first else 9},
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)

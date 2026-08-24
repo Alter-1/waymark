@@ -1040,6 +1040,46 @@ def main():
         check("--local REFUSES when there is no second root, rather than falling back",
               rc == 1, "rc=%s %s" % (rc, (err or out).strip()[:100]))
 
+
+    # A DEAD END DIES IN A CONTEXT. killed_by says what disproved a claim; it says nothing about
+    # whether the disproof still applies. Measured on a real KB: 21 dead claims, 19 recording what
+    # killed them, ZERO recording what the death depended on -- so when a toolchain or a board
+    # revision moved, nothing could answer "which refutations should I recheck?".
+    with tempfile.TemporaryDirectory() as tdr:
+        rep = Path(tdr)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int f(void){return 1;}\n", encoding="utf-8")
+        (rep / "Docs").mkdir()
+        (rep / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "Docs/source_index_annotations.json"}), encoding="utf-8")
+        (rep / "Docs" / "source_index_annotations.json").write_text(json.dumps({
+            "schema": 2, "features": [
+                {"name": "revivable-entry", "kind": "feature", "status": "n/a", "keywords": ["fx"],
+                 "brief": "x", "claims": [
+                     {"status": "dead", "evidence": "measured", "date": "2026-01-01",
+                      "text": "the fast path cannot work",
+                      "killed_by": "measured 3x slower",
+                      "revive_if": "the allocator stops serialising -- retest on any IDF bump"},
+                     {"status": "dead", "evidence": "measured", "date": "2026-01-02",
+                      "text": "a second dead end that named no condition",
+                      "killed_by": "disproved"}]}]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py")], cwd=rep)
+        check("revive_if indexes", rc == 0, err.strip()[-160:])
+        q = str(rep / ".tools" / "query_code_index.py")
+        rc, out, _ = run([q, "claim", "--revivable"], cwd=rep)
+        check("--revivable finds the claim that named its condition",
+              "the fast path cannot work" in out, out.strip()[:140])
+        check("and EXCLUDES the dead end that named none",
+              "named no condition" not in out, out.strip()[:140])
+        rc, out, _ = run([q, "claim", "--status", "dead"], cwd=rep)
+        check("both dead claims still list without the filter",
+              out.count("status: dead") == 2, out.count("status: dead"))
+        check("and the revival condition is shown, not just stored",
+              "allocator stops serialising" in out, out.strip()[:160])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

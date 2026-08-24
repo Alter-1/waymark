@@ -75,7 +75,7 @@ SKIP_DIRS = {
     "build", "dist", "Production", "Archive",
 }
 MAX_FILE_BYTES = 2_000_000
-INDEX_SCHEMA_VERSION = "7"
+INDEX_SCHEMA_VERSION = "8"      # 8: claims.revive_if
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
@@ -440,7 +440,14 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
             evidence TEXT NOT NULL DEFAULT 'unstated',
             status TEXT NOT NULL DEFAULT 'live',
             dated TEXT NOT NULL DEFAULT '',
-            killed_by TEXT NOT NULL DEFAULT ''
+            killed_by TEXT NOT NULL DEFAULT '',
+            -- WHAT WOULD MAKE IT TRUE AGAIN. killed_by records the past: what disproved this. It
+            -- says nothing about whether the disproof still applies. A dead end dies in a
+            -- CONTEXT -- a toolchain, a hardware revision, a data shape -- and when that context
+            -- moves the conclusion can come back to life while the entry still reads "refuted".
+            -- Measured on the KB this engine came from: 21 dead claims, 19 recording what killed
+            -- them, ZERO recording what the death depended on.
+            revive_if TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS claims_entry_idx ON claims(entry);
         CREATE INDEX IF NOT EXISTS claims_status_idx ON claims(status);
@@ -1687,8 +1694,8 @@ def insert_annotation(con: sqlite3.Connection, name: str, kind: str, item: dict)
                 f"{name}: claim status {cst!r} (use one of {'/'.join(CLAIM_STATUSES)})")
             cst = "live"
         con.execute(
-            "INSERT INTO claims(entry, kind, text, evidence, status, dated, killed_by)"
-            " VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO claims(entry, kind, text, evidence, status, dated, killed_by, revive_if)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             # ACCEPT EITHER SPELLING. The column is `dated` and the documented authoring key is
             # `date`, which is exactly the kind of near-miss that gets typed the other way --
             # and this repository's own sample KB did, losing every claim date SILENTLY. No
@@ -1696,7 +1703,9 @@ def insert_annotation(con: sqlite3.Connection, name: str, kind: str, item: dict)
             # when something was established.
             (name, kind, text, cev, cst,
              str(claim.get("date") or claim.get("dated") or ""),
-             str(claim.get("killed_by") or "")),
+             str(claim.get("killed_by") or ""),
+             # accept the two spellings someone will reach for
+             str(claim.get("revive_if") or claim.get("revisit_if") or "")),
         )
 
 
@@ -2426,7 +2435,7 @@ def export_json(con: sqlite3.Connection, path: Path, stats: dict) -> None:
         # Advertised in stats since they were added; without these the export said params=174 and
         # shipped none of them, so any consumer of the JSON saw a count it could not read.
         "params": query_all(con, "SELECT target, field, kind, label, label_src, value, meaning, is_default, source FROM params ORDER BY target, field, value"),
-        "claims": query_all(con, "SELECT entry, kind, text, evidence, status, dated, killed_by FROM claims ORDER BY status, entry"),
+        "claims": query_all(con, "SELECT entry, kind, text, evidence, status, dated, killed_by, revive_if FROM claims ORDER BY status, entry"),
     }
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, sort_keys=True)
