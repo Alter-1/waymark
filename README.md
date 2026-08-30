@@ -567,6 +567,13 @@ Four more optional fields decide **what** gets scanned and **which grammar** par
 * `c_like_exts` / `js_like_exts` — which extensions are parsed with the C-like or JS-like grammar,
   and lexed for their comment style. **Setting `source_exts` alone indexes the files and their
   comments but finds no symbols**, so a brace language wants both.
+* `c_like_exts` / `js_like_exts` / `xml_like_exts` **replace** their built-in sets too. Naming
+  `".cs"` alone means C and C++ are no longer parsed — list every extension the project wants, not
+  just the new one.
+* `xml_like_exts` — markup parsed with the XML-like grammar: `.xml`, `.xaml`, `.xsd`, `.xsl`,
+  `.resx` by default. It indexes the names a thing can be **referred to by** — `x:Class`, `x:Name`,
+  `x:Key`, and `id`/`name` in plain XML — not element tags, which would bury the file in `<Grid>`.
+  None of these are in the default `source_exts`, so nothing changes until a project asks for them.
 * `skip_dirs` — directories never descended into. Replaces the built-in set rather than adding to
   it, because a project that names them is describing its own tree.
 * `max_file_bytes` — size cap per file, default 2 MB.

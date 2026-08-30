@@ -1170,6 +1170,46 @@ def main():
         check("max_file_bytes excludes an oversized file", "TooLarge" not in names,
               "a file over the configured cap was indexed")
 
+    # MARKUP. XML/XAML are neither a brace language nor JavaScript: the only comment is <!-- -->,
+    # and what is worth navigating to is an ATTRIBUTE, not a function. The commented-out case is the
+    # one that matters -- markup inside <!-- --> must not be indexed as live, which is the whole
+    # reason the lexer's markup set had to stop being hard-coded.
+    with tempfile.TemporaryDirectory() as tdxml:
+        rep = Path(tdxml)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "MainWindow.xaml").write_text(
+            '<Window x:Class="Acme.Views.MainWindow">\n'
+            '  <!-- <Button x:Name="GhostButton" /> -->\n'
+            '  <Button x:Name="SaveButton" Content="Save" />\n'
+            '  <Style x:Key="HeaderStyle" TargetType="TextBlock" />\n'
+            '</Window>\n', encoding="utf-8")
+        (rep / "src" / "config.xml").write_text(
+            '<settings>\n  <entry id="retry_count">3</entry>\n</settings>\n', encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({
+            "roots": ["src"], "source_exts": [".xaml", ".xml"],
+        }), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a markup project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _sx
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        rows = {}
+        if dbs:
+            con = _sx.connect(str(dbs[0]))
+            rows = {r[0]: r[1] for r in con.execute("SELECT name, commented_out FROM symbols")}
+            con.close()
+        check("x:Name is indexed", "SaveButton" in rows, "symbols: %s" % sorted(rows)[:8])
+        check("x:Key is indexed", "HeaderStyle" in rows, "symbols: %s" % sorted(rows)[:8])
+        check("x:Class is indexed, fully qualified", "Acme.Views.MainWindow" in rows,
+              "symbols: %s" % sorted(rows)[:8])
+        check("a plain XML id is indexed", "retry_count" in rows, "symbols: %s" % sorted(rows)[:8])
+        # The one that would silently rot: <!-- --> is the ONLY comment form here, so if the lexer
+        # does not know this extension is markup, commented-out controls are indexed as live.
+        check("markup inside <!-- --> is NOT live", rows.get("GhostButton") == 1,
+              "GhostButton commented_out=%r (expected 1)" % rows.get("GhostButton"))
+
     # ... and an UNCONFIGURED project still gets the built-in defaults. Making the knobs
     # configurable must not make them mandatory: a repo with no kb.config.json entry for them is the
     # common case and every existing project is one.
