@@ -34,15 +34,20 @@
  ],
  "symbols": [
   {
-   "name": "wal_replay",
-   "notes": "Replay STOPS at the first bad magic or CRC and reports success. A torn tail is the NORMAL state after a crash, not corruption -- treating it as an error made every unclean restart look like data loss.",
+   "name": "_ext_set",
+   "notes": "SYMPTOM: the index reports one file and no symbols, exits 0, and every query then answers \"no matches\" - which reads as an empty topic rather than a broken setup. CAUSE: the file's extension is not in SOURCE_EXTS. Until 300826 that set was a hard-coded literal (C/C++/py/js/html/css/sh), so a project in any other language could not be indexed at all and nothing said so. An earlier lineage of this indexer DID take source_exts/skip_dirs/max_file_bytes from the project config; waymark never carried them over. FIX: _ext_set() reads source_exts, c_like_exts, js_like_exts from kb.config.json, each defaulting to the previous hard-coded set, and skip_dirs/max_file_bytes are read the same way. source_exts alone is a HALF-ANSWER: it indexes files and comments but yields no symbols, because symbol extraction dispatches on C_LIKE_EXTS/JS_LIKE_EXTS - a brace language needs c_like_exts too. LEXER_C_LIKE_EXTS (= C_LIKE_EXTS | {.js,.css}) replaced a second hard-coded copy of the same set inside the lexer, which would otherwise have failed to recognise the new extension's block comments and read commented-out code as live. MEASURED on VEO 2.0, a 421-file C# tree: before, 1 file / 5 symbols / 10 refs; after, 421 files / 5714 symbols / 38312 refs. Its previous purpose-built C# parser found 5959 symbols, so C-like parsing of C# is navigation, not comprehension - it misses properties and expression-bodied members. skip_dirs REPLACES the default set rather than extending it, deliberately: a project naming them is describing its own tree, and silently re-adding build/dist would index directories it had just excluded.",
+   "file": ".tools/index_code.py",
    "keywords": [
-    "wal",
-    "replay",
-    "torn-tail",
-    "crash-recovery",
-    "not-an-error"
-   ]
+    "no matches",
+    "empty index",
+    "one file no symbols",
+    "source_exts",
+    "skip_dirs",
+    "c_like_exts",
+    "language not indexed",
+    "C sharp"
+   ],
+   "ts": "300826 10:38"
   },
   {
    "name": "wal_open",
@@ -61,6 +66,17 @@
    },
    "see_also": [
     "symbol:wal_replay"
+   ]
+  },
+  {
+   "name": "wal_replay",
+   "notes": "Replay STOPS at the first bad magic or CRC and reports success. A torn tail is the NORMAL state after a crash, not corruption -- treating it as an error made every unclean restart look like data loss.",
+   "keywords": [
+    "wal",
+    "replay",
+    "torn-tail",
+    "crash-recovery",
+    "not-an-error"
    ]
   }
  ],

@@ -27,6 +27,10 @@ your project:
 * `roots` — subdirectories to index. Defaults to the whole repository.
 * `annotations` — where the KB lives. A single `.json` file **or** a directory of one file per
   entry. May be a **list**, and entries may be absolute or `~` paths.
+* `source_exts`, `c_like_exts`, `js_like_exts`, `skip_dirs`, `max_file_bytes` — what to scan and
+  which grammar parses it. Only needed for a language outside the built-in C/C++/Python/JS/shell
+  list; **without them such a project indexes as one file and no symbols, and still exits 0.** See
+  the README.
 * `api_regex`, `version_file`, `plugins` — optional; see the README.
 
 Then:
