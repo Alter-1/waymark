@@ -1128,10 +1128,10 @@ def xml_symbol_name(line: str) -> str:
     m = XML_NAME_RE.search(line)
     if not m:
         return ""
-    name = m.group(2).strip()
-    # A XAML x:Class is fully qualified (Acme.Views.MainWindow); index the leaf too, since that is
-    # what a reader searches for, and the full form stays in the signature.
-    return name
+    # A XAML x:Class is fully qualified (Acme.Views.MainWindow) and is indexed that way, as ONE
+    # symbol. No separate row for the leaf: symbol lookup is a substring LIKE, so `symbol MainWindow`
+    # already finds it, and a second row would be one declaration counted twice.
+    return m.group(2).strip()
 
 
 def symbol_comment_ranges_for_leading_comments(ranges: list[dict], lines: list[str], line_no: int) -> set[int]:
