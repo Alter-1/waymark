@@ -1203,6 +1203,46 @@ def main():
         check("a path escaping the repository does not resolve",
               "outside.md" in out, out.strip()[:200])
 
+    # ---- an unknown status/evidence value must not go quiet ------------------
+    # Both are SILENTLY DOWNGRADED: an unknown status becomes n/a and the entry drops off the `open`
+    # list, an unknown evidence becomes `unstated`. The loader always detected them and printed to
+    # stderr -- but only on a rebuild that actually re-reads the KB, and an unchanged KB
+    # short-circuits on the freshness check. So the warning was invisible on the rebuild everyone
+    # runs, and 65 of them accumulated unseen in a real KB. selftest is where a standing problem
+    # belongs, and selftest never re-reads the KB at all.
+    with tempfile.TemporaryDirectory() as tdv:
+        vr = Path(tdv) / "repo"; (vr / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py"):
+            (vr / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (vr / "src").mkdir(); (vr / "src" / "a.c").write_text("void a(void){}\n", encoding="utf-8")
+        kb = vr / "kb"; (kb / "features").mkdir(parents=True)
+        (kb / "kb.json").write_text(json.dumps(
+            {"schema": 2, "scope": "shared", "collections": ["features"]}), encoding="utf-8")
+        (kb / "features" / "good.md").write_text(
+            "---\nconcept_id: t.good\nname: good\nkind: rule\nstatus: resolved\n"
+            "evidence: measured\n---\n\n## notes\n\nfine\n", encoding="utf-8")
+        (vr / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "kb"}), encoding="utf-8")
+        run([str(vr / ".tools" / "index_code.py"), "--force"], cwd=vr)
+        rc, out, _ = query("selftest", cwd=vr)
+        check("a clean KB passes the vocabulary check", "KB vocabulary" in out and rc == 0,
+              out.strip()[-200:])
+
+        (kb / "features" / "bad.md").write_text(
+            "---\nconcept_id: t.bad\nname: bad\nkind: rule\nstatus: closed\n"
+            "evidence: performed last Tuesday\n---\n\n## notes\n\ndrifted\n", encoding="utf-8")
+        run([str(vr / ".tools" / "index_code.py")], cwd=vr)          # the KB changed: a real load
+        # ...and now the rebuild everyone runs, which re-reads nothing at all.
+        _, cached, _ = run([str(vr / ".tools" / "index_code.py")], cwd=vr)
+        check("the cheap rebuild really is the cached path",
+              '"cached": true' in cached.lower(), cached.strip()[:120])
+        rc, out, _ = query("selftest", cwd=vr)
+        check("an unknown status/evidence is reported by selftest after a CACHED rebuild",
+              "KB vocabulary is known to the engine" in out and "PROBLEM" in out, out.strip()[-260:])
+        check("and selftest fails rather than passing quietly", rc != 0, f"rc={rc}")
+        check("the report names a value, not just a count",
+              "closed" in out or "performed last Tuesday" in out, out.strip()[-260:])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

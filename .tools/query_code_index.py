@@ -695,6 +695,26 @@ def main() -> int:
         unstated = con.execute("SELECT count(*) FROM claims WHERE evidence = 'unstated'").fetchone()[0]
         chk("claims carry provenance", unstated == 0, f"{unstated} without evidence")
 
+        # A STATUS OR EVIDENCE VALUE THE ENGINE DOES NOT KNOW IS SILENTLY DOWNGRADED -- an unknown
+        # status becomes n/a and drops off the `open` list, an unknown evidence becomes `unstated`.
+        # The loader detects both and prints them, but only on a rebuild that actually re-reads the
+        # KB; an unchanged KB short-circuits, so the warning is invisible on the rebuild everyone
+        # runs. That is how 65 of them accumulated unnoticed in a real KB, and it is why the count
+        # is persisted and asked for HERE, in the command whose whole job is to say whether the KB
+        # is healthy.
+        try:
+            vocab = [r[0] for r in con.execute("SELECT problem FROM kb_status_problems LIMIT 3")]
+            vocab_n = con.execute("SELECT count(*) FROM kb_status_problems").fetchone()[0]
+        except sqlite3.Error:
+            vocab_n = 0          # an index from an older engine has no such table
+            vocab = []
+        if vocab_n:
+            chk("KB vocabulary is known to the engine", False,
+                f"{vocab_n} unknown status/evidence value(s), silently downgraded -- e.g. " +
+                "; ".join(vocab))
+        else:
+            chk("KB vocabulary is known to the engine", True)
+
         suspect = con.execute("SELECT count(DISTINCT field) FROM params "
                               "WHERE label_src = 'suspect'").fetchone()[0]
         chk("param labels clean", suspect == 0, f"{suspect} fields with uncertain labels")

@@ -125,7 +125,7 @@ SKIP_DIRS = {
     "build", "dist", "Production", "Archive",
 }
 MAX_FILE_BYTES = 2_000_000
-INDEX_SCHEMA_VERSION = "8"      # 8: claims.revive_if
+INDEX_SCHEMA_VERSION = "9"      # 9: kb_status_problems
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
@@ -632,6 +632,16 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
         );
         CREATE INDEX IF NOT EXISTS kb_relations_status_idx ON kb_relations(status);
 
+        -- VOCABULARY PROBLEMS FOUND WHEN THE KB WAS LAST PARSED. They were already detected and
+        -- already printed -- to stderr, at the end of a rebuild that actually re-read the KB. The
+        -- catch is that the common rebuild does NOT re-read it: an unchanged KB short-circuits on
+        -- the freshness check and returns cached stats, so the warning appears only on --force.
+        -- 65 of them had accumulated in a real KB, unseen, because nobody forces a rebuild without
+        -- a reason. Persisting them lets `selftest` -- the command someone runs to ask whether the
+        -- KB is healthy -- answer with what is actually wrong with it.
+        CREATE TABLE IF NOT EXISTS kb_status_problems(
+            problem TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS kb_links(
             -- WHERE THE LINK WAS WRITTEN. 'see_also' is the declared field; 'inline' is a [[name]]
             -- written in the prose, which is how most of them are actually written -- 232 of them
@@ -2744,6 +2754,12 @@ def main() -> int:
                   f"  the index is being built WITHOUT any notes -- check `annotations` in "
                   f"kb.config.json, and that the file exists", file=sys.stderr)
         load_annotations(con, annotation_path)
+    # RECORDED, not just printed -- see the kb_status_problems comment in the schema. Written HERE,
+    # while the connection is open and every annotation path has been parsed; the stderr summary at
+    # the end of main() runs after the database is closed.
+    con.execute("DELETE FROM kb_status_problems")
+    con.executemany("INSERT INTO kb_status_problems(problem) VALUES(?)",
+                    [(p,) for p in annotation_status_problems])
     # After BOTH symbols and annotations exist: the link needs each side.
     link_annotations_to_symbols(con)
     link_commits(con)
