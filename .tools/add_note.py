@@ -33,6 +33,31 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+
+# Force UTF-8 on stdout.
+#
+# KB entries and source are read as text and may legitimately contain non-ASCII, but the console
+# encoding is whatever the host locale says. On a Windows work host that is cp1252, and printing
+# then fails in two different ways depending on the character:
+#
+#   * one cp1252 HAPPENS to have - an em dash becomes byte 0x97, curly quotes likewise - is written
+#     as a cp1252 byte and comes back as mojibake to anything reading the output as UTF-8. An entry
+#     read back with a replacement character mid-sentence looks like a corrupted ENTRY rather than a
+#     display problem, which sends the reader after the wrong bug.
+#   * one cp1252 does NOT have - an arrow, most symbols - raises
+#         UnicodeEncodeError: 'charmap' codec can't encode character '\u2192'
+#     and the query CRASHES. One arrow in one entry breaks the tool for that entry.
+#
+# errors="replace" so anything that still cannot be encoded degrades to a visible marker rather than
+# taking the whole query down. reconfigure() exists from Python 3.7, which is the interpreter floor
+# this engine targets; the guard keeps it working on anything older and on a redirected stdout that
+# is not a TextIOWrapper.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_EXTS = (".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino",
                 ".py", ".js", ".html", ".htm", ".css", ".sh", ".cs")
