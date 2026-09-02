@@ -205,6 +205,50 @@ def main():
         check("foreign repo: a codebase with constants reports them",
               re.search(r"constants non-empty[\s\S]{0,40}ok", out) is not None, out.strip()[-200:])
 
+    # ---- source is not always UTF-8 -----------------------------------------
+    # Once wrong: read_text() decoded every source as UTF-8 with errors="replace", so a file in
+    # any other encoding was harvested as U+FFFD soup with NO signal that anything had happened.
+    # MEASURED on a 6423-file C++ project: 38 files failed strict UTF-8, in three encodings -
+    # cp1252 punctuation, and UTF-16 with a BOM.
+    #
+    # The UTF-16 case is the severe one and is why this is a correctness bug rather than cosmetics.
+    # Decoding UTF-16 as UTF-8 does not lose a few characters, it loses EVERYTHING: the text arrives
+    # as "i n t" interleaved with NULs, so no declaration matches and every symbol and comment in
+    # that file is missing from the index while the run reports success.
+    with tempfile.TemporaryDirectory() as tde:
+        enc = Path(tde)
+        (enc / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (enc / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (enc / "src").mkdir()
+        # cp1252: a middle dot used as a comment bullet, and curly quotes around a word
+        (enc / "src" / "legacy.c").write_bytes(
+            u"/* \u00b7 clamps the \u2018ceiling\u2019 value */\n"
+            u"int cp1252_fn(int n) { return n; }\n".encode("cp1252"))
+        # UTF-16 LE, BOM included, exactly as a Windows editor writes it
+        (enc / "src" / "wide.c").write_bytes(
+            u"/* the wide ceiling */\nint utf16_fn(int n) { return n; }\n".encode("utf-16"))
+
+        rc, out, err = run([str(enc / ".tools" / "index_code.py")], cwd=enc)
+        check("mixed-encoding project: index builds", rc == 0, err.strip()[-200:])
+
+        rc, out, _ = query("symbol", "cp1252_fn", cwd=enc)
+        check("cp1252 source: the symbol is indexed", "cp1252_fn" in out, out.strip()[:160])
+
+        rc, out, _ = query("symbol", "utf16_fn", cwd=enc)
+        check("UTF-16 source: the symbol is indexed at all", "utf16_fn" in out, out.strip()[:160])
+
+        # Assert the query SUCCEEDS and the text is really there. Checking only for the absence of
+        # U+FFFD passes for the WRONG REASON: before the fix the two bugs chained - the bad decode
+        # produced U+FFFD, and printing it raised UnicodeEncodeError on a cp1252 stdout, so the
+        # query died at rc=1 with stdout truncated to the symbol line. No replacement character in
+        # the output, because there was no output.
+        rc, out, err = query("comment", "ceiling", cwd=enc)
+        check("non-UTF-8 comment query does not crash", rc == 0, err.strip()[-160:])
+        check("non-UTF-8 comment is actually harvested", "clamps" in out, out.strip()[:200])
+        check("non-UTF-8 comments decode without replacement characters",
+              "\ufffd" not in out, out.strip()[:200])
+
     # a codebase that legitimately defines NO constants must not be judged for it
     with tempfile.TemporaryDirectory() as td2:
         bare = Path(td2)

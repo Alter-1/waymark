@@ -715,8 +715,57 @@ def iter_source_files(roots: list[str]) -> list[Path]:
     return sorted(files)
 
 
+# Decode source with the encoding it is actually in.
+#
+# This was a bare read_text(encoding="utf-8", errors="replace"), which assumes every codebase is
+# UTF-8. Real ones are not: a long-lived C/C++ tree is typically ASCII with cp1252 punctuation, and
+# Windows editors still write UTF-16 with a BOM. Every byte UTF-8 could not handle silently became
+# U+FFFD, so a correctly-encoded file was harvested as damaged text and nothing downstream could
+# tell that from a genuinely odd comment. Same failure class as a silently truncated search: the
+# result looks complete.
+#
+# MEASURED on a 6423-file C++ project: 38 files failed strict UTF-8, 99 characters in total, in
+# three encodings - cp1252 punctuation (a middle dot used as a comment bullet, curly quotes) and
+# UTF-16 LE with a BOM. None of those files was corrupt; they were read wrongly.
+#
+# The UTF-16 case is why the BOM check comes first and why this is a correctness bug rather than a
+# cosmetic one. Decoding UTF-16 as UTF-8 does not lose a few characters, it loses EVERYTHING: the
+# text arrives as "i n t" interleaved with NULs, no declaration matches, and every symbol and
+# comment in the file is missing from the index while the run reports success.
+#
+# ORDER. utf-8 first so anything genuinely UTF-8 - and all plain ASCII, a subset - decodes exactly;
+# then cp1252, the common legacy case; then latin-1, which maps all 256 byte values and therefore
+# cannot fail. The replace-and-tag path below is consequently unreachable in practice, and is kept
+# so that an encoding nobody predicted degrades VISIBLY instead of silently.
+ENCODING_INCOMPAT_MARKER = "!!! CONTAINS INCOMPAT ENCODING"
+ENCODING_INCOMPAT_FILES: list = []
+
+
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
+    raw = path.read_bytes()
+
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+
+    for codec in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(codec)
+        except UnicodeDecodeError:
+            continue
+
+    text = raw.decode("utf-8", errors="replace")
+    lost = text.count("\ufffd")
+    ENCODING_INCOMPAT_FILES.append((str(path), lost))
+
+    # The tag goes on the TAIL, never the head: prepending a line would shift every line number in
+    # the file by one, and line numbers are what the symbol index is FOR.
+    return (text + "\n"
+            + ENCODING_INCOMPAT_MARKER + ": " + str(lost)
+            + " character(s) could not be decoded and were replaced."
+            + " Content harvested from this file may be wrong. !!!\n")
 
 
 @dataclass
