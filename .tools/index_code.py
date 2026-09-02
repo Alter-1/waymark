@@ -125,7 +125,7 @@ SKIP_DIRS = {
     "build", "dist", "Production", "Archive",
 }
 MAX_FILE_BYTES = 2_000_000
-INDEX_SCHEMA_VERSION = "9"      # 9: kb_status_problems
+INDEX_SCHEMA_VERSION = "10"     # 10: evidence_note, unified evidence vocabulary
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
@@ -550,7 +550,14 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
             entry TEXT NOT NULL,
             kind TEXT NOT NULL,
             text TEXT NOT NULL,
-            evidence TEXT NOT NULL DEFAULT 'unstated',
+            evidence TEXT NOT NULL DEFAULT 'unknown',
+            -- THE QUALIFIER, kept apart from the enum ON PURPOSE. `evidence` is what the engine
+            -- FILTERS and SORTS on, so it has to stay a small closed set; the date, the build and
+            -- the rig are what a reader needs to decide whether the finding still holds, and no
+            -- enum can carry those. One authored field, `measured -- 2026-08-31 on the a/b bench`,
+            -- feeds both. Before this, writing the useful half cost the entry its provenance: the
+            -- whole sentence failed the vocabulary check and was downgraded to "nobody said".
+            evidence_note TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'live',
             dated TEXT NOT NULL DEFAULT '',
             killed_by TEXT NOT NULL DEFAULT '',
@@ -669,6 +676,7 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
             kind TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'n/a',
             evidence TEXT NOT NULL DEFAULT 'unknown',
+            evidence_note TEXT NOT NULL DEFAULT '',
             value TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS annotations_status_idx ON annotations(status);
@@ -1755,7 +1763,16 @@ ANNOTATION_STATUSES = ("open", "resolved", "wontfix", "n/a")
 # commits "proved" inert that a measurement later exonerated for different reasons. A claim that was
 # reasoned to is not the same kind of thing as one that was measured, and the reader deserves to
 # know which before acting on it.
-ANNOTATION_EVIDENCE = ("measured", "inferred", "mixed", "unknown")
+# ONE VOCABULARY FOR BOTH LEVELS. It used to be two, differing by one value each way, under the
+# same field name: `reported` was valid on a claim and rejected on an entry, `mixed` the reverse.
+# Five of the 65 drifted values were nothing but that confusion. What the word has to answer is the
+# same question at either level -- how much should a reader trust this, and what would it take to
+# check -- so there is no reason for two answers.
+EVIDENCE = ("measured", "inferred", "reported", "mixed", "unknown")
+# `unstated` was the claim-level spelling of "nobody said". Kept as an accepted input so existing
+# entries do not break, normalised to `unknown` on the way in.
+EVIDENCE_SYNONYMS = {"unstated": "unknown"}
+ANNOTATION_EVIDENCE = EVIDENCE
 annotation_status_problems: list[str] = []
 
 
@@ -1770,8 +1787,46 @@ STATUS_BEARING_KINDS = ("feature",)
 # voice, and the wrong one was acted on for hours. A claim carries its own provenance, and can be
 # killed without deleting it -- a dead hypothesis is the most reusable thing in the KB, because it
 # is what stops the next session re-deriving it.
-CLAIM_EVIDENCE = ("measured", "inferred", "reported", "unstated")
-CLAIM_STATUSES = ("live", "dead", "open")
+def split_evidence(raw: str) -> tuple:
+    """`measured -- 2026-08-31 on the a/b bench` -> ("measured", "2026-08-31 on the a/b bench", True).
+
+    Returns (enum, qualifier, recognised). `recognised` is False when the leading word is not a
+    known value, so the caller still reports it rather than accepting anything.
+
+    BOTH SEPARATORS ARE ACCEPTED, and the bare one matters most: people already write
+    `measured 2026-08-31 on the a/b bench` without thinking about it, which is the whole reason
+    this exists. Rejecting the natural spelling is what produced the drift in the first place.
+    A lone enum has no qualifier and is perfectly valid.
+    """
+    text = " ".join(str(raw or "").split())
+    if not text:
+        return "", "", True
+    for sep in (" -- ", " – ", ": "):
+        if sep in text:
+            head, tail = text.split(sep, 1)
+            head = head.strip().lower()
+            head = EVIDENCE_SYNONYMS.get(head, head)
+            if head in EVIDENCE:
+                return head, tail.strip(), True
+            break
+    head = text.split(" ", 1)
+    first = EVIDENCE_SYNONYMS.get(head[0].strip().lower().rstrip(","), head[0].strip().lower().rstrip(","))
+    if first in EVIDENCE:
+        return first, (head[1].strip() if len(head) > 1 else ""), True
+    whole = EVIDENCE_SYNONYMS.get(text.lower(), text.lower())
+    if whole in EVIDENCE:
+        return whole, "", True
+    return "unknown", text, False
+
+
+CLAIM_EVIDENCE = EVIDENCE
+# `done` IS NOT `dead`, AND CONFLATING THEM WOULD INVERT THE RECORD. `dead` means the claim was
+# REFUTED -- kept visible precisely so nobody re-derives it. A claim that was RIGHT and has since
+# been acted on is the opposite: the diagnosis held and the code moved on. Both were being written
+# as `superseded` (10 of them), so collapsing that into `dead` would have told a later session that
+# a correct root-cause analysis had been disproved -- in the one field relied on to avoid repeating
+# dead ends.
+CLAIM_STATUSES = ("live", "dead", "open", "done")
 
 
 def insert_annotation(con: sqlite3.Connection, name: str, kind: str, item: dict) -> None:
@@ -1787,18 +1842,19 @@ def insert_annotation(con: sqlite3.Connection, name: str, kind: str, item: dict)
         annotation_status_problems.append(
             f"{name}: unknown status {status!r} (use one of {'/'.join(ANNOTATION_STATUSES)})")
         status = "n/a"
-    evidence = str(item.get("evidence") or "").strip().lower()
-    if kind not in STATUS_BEARING_KINDS:
-        evidence = "unknown"
-    elif not evidence:
-        evidence = "unknown"
-    elif evidence not in ANNOTATION_EVIDENCE:
+    raw_evidence = str(item.get("evidence") or "")
+    evidence, evidence_note, known = split_evidence(raw_evidence)
+    if kind not in STATUS_BEARING_KINDS or not raw_evidence.strip():
+        evidence, evidence_note = "unknown", ""
+    elif not known:
         annotation_status_problems.append(
-            f"{name}: unknown evidence {evidence!r} (use one of {'/'.join(ANNOTATION_EVIDENCE)})")
-        evidence = "unknown"
+            f"{name}: unknown evidence {raw_evidence.strip().lower()!r} "
+            f"(use one of {'/'.join(EVIDENCE)}, optionally followed by ' -- <detail>')")
     con.execute(
-        "INSERT INTO annotations(name, kind, status, evidence, value) VALUES(?,?,?,?,?)",
-        (name, kind, status, evidence, json.dumps(item, ensure_ascii=False, sort_keys=True)),
+        "INSERT INTO annotations(name, kind, status, evidence, evidence_note, value)"
+        " VALUES(?,?,?,?,?,?)",
+        (name, kind, status, evidence, evidence_note,
+         json.dumps(item, ensure_ascii=False, sort_keys=True)),
     )
     for claim in item.get("claims") or []:
         if isinstance(claim, str):
@@ -1806,25 +1862,28 @@ def insert_annotation(con: sqlite3.Connection, name: str, kind: str, item: dict)
         text = str(claim.get("text") or "").strip()
         if not text:
             continue
-        cev = str(claim.get("evidence") or "unstated").strip().lower()
-        cst = str(claim.get("status") or "live").strip().lower()
-        if cev not in CLAIM_EVIDENCE:
+        raw_cev = str(claim.get("evidence") or "")
+        cev, cev_note, known = split_evidence(raw_cev)
+        if not raw_cev.strip():
+            cev, cev_note = "unknown", ""
+        elif not known:
             annotation_status_problems.append(
-                f"{name}: claim evidence {cev!r} (use one of {'/'.join(CLAIM_EVIDENCE)})")
-            cev = "unstated"
+                f"{name}: claim evidence {raw_cev.strip().lower()!r} "
+                f"(use one of {'/'.join(EVIDENCE)}, optionally followed by ' -- <detail>')")
+        cst = str(claim.get("status") or "live").strip().lower()
         if cst not in CLAIM_STATUSES:
             annotation_status_problems.append(
                 f"{name}: claim status {cst!r} (use one of {'/'.join(CLAIM_STATUSES)})")
             cst = "live"
         con.execute(
-            "INSERT INTO claims(entry, kind, text, evidence, status, dated, killed_by, revive_if)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO claims(entry, kind, text, evidence, evidence_note, status, dated,"
+            " killed_by, revive_if) VALUES(?,?,?,?,?,?,?,?,?)",
             # ACCEPT EITHER SPELLING. The column is `dated` and the documented authoring key is
             # `date`, which is exactly the kind of near-miss that gets typed the other way --
             # and this repository's own sample KB did, losing every claim date SILENTLY. No
             # error, no warning, just a blank column nobody looks at until they want to know
             # when something was established.
-            (name, kind, text, cev, cst,
+            (name, kind, text, cev, cev_note, cst,
              str(claim.get("date") or claim.get("dated") or ""),
              str(claim.get("killed_by") or ""),
              # accept the two spellings someone will reach for

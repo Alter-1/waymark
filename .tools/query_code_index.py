@@ -422,7 +422,7 @@ def main() -> int:
     p = sub.add_parser("claim")
     p.add_argument("term", nargs="?", default="", help="words from the claim, or an entry name")
     p.add_argument("--status", default="", help="live, dead or open; all by default")
-    p.add_argument("--evidence", default="", help="measured, inferred, reported or unstated")
+    p.add_argument("--evidence", default="", help="measured, inferred, reported, mixed or unknown")
     p.add_argument("--dead-first", action="store_true",
                    help="killed hypotheses first -- what has already been tested and disproved is "
                         "the most reusable thing here")
@@ -692,7 +692,10 @@ def main() -> int:
                 checks.append(("relations are being checked", "REVIEW",
                                f"{unwatched} of {total} not verifiable -- nothing is watching them"))
 
-        unstated = con.execute("SELECT count(*) FROM claims WHERE evidence = 'unstated'").fetchone()[0]
+        # 'unstated' was the old spelling of the same thing and may still sit in an index built
+        # before the vocabularies were unified.
+        unstated = con.execute("SELECT count(*) FROM claims "
+                               "WHERE evidence IN ('unknown', 'unstated')").fetchone()[0]
         chk("claims carry provenance", unstated == 0, f"{unstated} without evidence")
 
         # A STATUS OR EVIDENCE VALUE THE ENGINE DOES NOT KNOW IS SILENTLY DOWNGRADED -- an unknown
@@ -747,7 +750,7 @@ def main() -> int:
         # notes blob nobody reads, in which live and killed claims read identically.
         cur = con.execute(
             """
-            SELECT status, evidence, entry, text, dated, killed_by, revive_if
+            SELECT status, evidence, evidence_note, entry, text, dated, killed_by, revive_if
             FROM claims
             WHERE (:t = '' OR text LIKE :frag OR entry LIKE :frag)
               AND (:st = '' OR status = :st)
@@ -770,7 +773,8 @@ def main() -> int:
               AND (:revivable = '' OR revive_if <> '')
             ORDER BY CASE status WHEN 'dead' THEN :deadrank
                                  WHEN 'open' THEN 1 WHEN 'live' THEN 2 ELSE 3 END,
-                     CASE evidence WHEN 'measured' THEN 0 WHEN 'reported' THEN 1 ELSE 2 END,
+                     CASE evidence WHEN 'measured' THEN 0 WHEN 'reported' THEN 1
+                                   WHEN 'mixed' THEN 2 WHEN 'inferred' THEN 3 ELSE 4 END,
                      entry
             LIMIT :lim
             """,
@@ -953,7 +957,7 @@ def main() -> int:
         if args.status == "all":
             cur = con.execute(
                 """
-                SELECT status, evidence, name, kind, value FROM annotations
+                SELECT status, evidence, evidence_note, name, kind, value FROM annotations
                 WHERE name LIKE ? OR value LIKE ?
                 ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'wontfix' THEN 1
                                      WHEN 'resolved' THEN 2 ELSE 3 END, name
@@ -964,7 +968,7 @@ def main() -> int:
         else:
             cur = con.execute(
                 """
-                SELECT status, evidence, name, kind, value FROM annotations
+                SELECT status, evidence, evidence_note, name, kind, value FROM annotations
                 WHERE status = ? AND (name LIKE ? OR value LIKE ?)
                 ORDER BY name LIMIT ?
                 """,

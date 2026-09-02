@@ -1243,6 +1243,70 @@ def main():
         check("the report names a value, not just a count",
               "closed" in out or "performed last Tuesday" in out, out.strip()[-260:])
 
+    # ---- the evidence qualifier, and one vocabulary for both levels ---------
+    # `evidence` is FILTERED and SORTED on, so it has to stay a small closed set. The date, the
+    # build and the rig are what tell a reader whether the finding still holds, and no enum carries
+    # those -- so people wrote the sentence instead, and the whole value failed the check and was
+    # downgraded to "nobody said". Writing the useful half cost the entry its provenance. One field
+    # now feeds both: a leading enum, optionally followed by the detail.
+    with tempfile.TemporaryDirectory() as tde:
+        er = Path(tde) / "repo"; (er / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py"):
+            (er / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (er / "src").mkdir(); (er / "src" / "a.c").write_text("void a(void){}\n", encoding="utf-8")
+        kb = er / "kb"; (kb / "features").mkdir(parents=True)
+        (kb / "kb.json").write_text(json.dumps(
+            {"schema": 2, "scope": "shared", "collections": ["features"]}), encoding="utf-8")
+
+        def entry(name, evidence, claims=""):
+            (kb / "features" / (name + ".md")).write_text(
+                f"---\nconcept_id: t.{name}\nname: {name}\nkind: feature\nstatus: resolved\n"
+                f"evidence: {evidence}\n{claims}---\n\n## notes\n\nbody\n", encoding="utf-8")
+
+        entry("dashed", "measured -- 2026-08-31 on the a/b bench, 2.0.20260828")
+        entry("bare", "measured 2026-08-31 on the a/b bench")
+        entry("plain", "measured")
+        entry("reported-entry", "reported -- the author said so")   # was CLAIM-only before
+        entry("prose", "performed last Tuesday by someone")
+        entry("claimful", "measured", claims=(
+            'claims: [{"text": "was right, now applied", "status": "done", "evidence": '
+            '"mixed -- code read plus one bench run"}]\n'))
+        (er / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "kb"}), encoding="utf-8")
+        run([str(er / ".tools" / "index_code.py"), "--force"], cwd=er)
+
+        import sqlite3 as _s
+        dbf = sorted((er / ".tools").glob("code_index.*.sqlite"))[0]
+        c = _s.connect(str(dbf))
+        got = dict((n, (e, q)) for n, e, q in
+                   c.execute("SELECT name, evidence, evidence_note FROM annotations"))
+        check("an enum with ' -- ' keeps both halves",
+              got.get("dashed") == ("measured", "2026-08-31 on the a/b bench, 2.0.20260828"),
+              str(got.get("dashed")))
+        check("the bare spelling people actually type is accepted too",
+              got.get("bare") == ("measured", "2026-08-31 on the a/b bench"), str(got.get("bare")))
+        check("a lone enum still has no qualifier", got.get("plain") == ("measured", ""),
+              str(got.get("plain")))
+        check("`reported` is now valid on an ENTRY, not only on a claim",
+              got.get("reported-entry") == ("reported", "the author said so"),
+              str(got.get("reported-entry")))
+        # PROSE MUST STILL BE REPORTED. A parser that quietly accepted anything would restore the
+        # exact silence this came from.
+        check("a sentence with no enum is still unknown and still reported",
+              got.get("prose", ("", ""))[0] == "unknown", str(got.get("prose")))
+        probs = [r[0] for r in c.execute("SELECT problem FROM kb_status_problems")]
+        check("...and it names the offending entry",
+              any("prose" in x for x in probs), str(probs))
+        check("a valid qualifier raises no problem",
+              not any("dashed" in x or "bare" in x for x in probs), str(probs))
+        cl = c.execute("SELECT status, evidence, evidence_note FROM claims").fetchone()
+        check("a claim can be `done` -- right, and acted on -- not only dead",
+              cl == ("done", "mixed", "code read plus one bench run"), str(cl))
+        c.close()
+        rc, out, _ = query("selftest", cwd=er)
+        check("selftest still flags the prose entry", "KB vocabulary" in out and rc != 0,
+              out.strip()[-160:])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
