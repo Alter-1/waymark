@@ -1123,6 +1123,86 @@ def main():
             check("hand-written symbol_metadata survives --force", note == 1,
                   "a note nobody can regenerate was destroyed by a rebuild")
 
+    # ---- a bare name that lives in ANOTHER store ---------------------------
+    # A KB links to knowledge kept elsewhere. Prefixed (`memory:foo`) already resolves to `external`
+    # and is never rot. The gap was the BARE name: 13 links in a real KB named entries in a private
+    # note store, and the report said only "missing" -- so the reader went looking for a KB entry
+    # that was never meant to exist, and the real breaks sat behind that noise. The link IS wrong
+    # and must stay `missing`; what it now also does is say where the thing actually is.
+    with tempfile.TemporaryDirectory() as tdx:
+        xr = Path(tdx) / "repo"; (xr / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py"):
+            (xr / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (xr / "src").mkdir(); (xr / "src" / "a.c").write_text("void a(void){}\n", encoding="utf-8")
+        kb = xr / "kb"; (kb / "features").mkdir(parents=True)
+        (kb / "kb.json").write_text(json.dumps(
+            {"schema": 2, "scope": "shared", "collections": ["features"]}), encoding="utf-8")
+        (kb / "features" / "alpha.md").write_text(
+            "---\nconcept_id: t.alpha\nname: alpha\nkind: rule\nstatus: resolved\n"
+            "see_also:\n  - remote-thing\n  - absent-everywhere\n---\n\n## notes\n\nbody\n",
+            encoding="utf-8")
+        store = Path(tdx) / "notes"; store.mkdir()
+        (store / "remote-thing.md").write_text("# kept somewhere else\n", encoding="utf-8")
+
+        def build_and_report(cfg):
+            (xr / "kb.config.json").write_text(json.dumps(cfg), encoding="utf-8")
+            run([str(xr / ".tools" / "index_code.py"), "--force"], cwd=xr)
+            return query("broken-links", cwd=xr)[1]
+
+        plain = build_and_report({"roots": ["src"], "annotations": "kb"})
+        check("without a configured store a bare name is just missing",
+              "remote-thing" in plain and "write it as" not in plain, plain.strip()[:160])
+
+        cfg = {"roots": ["src"], "annotations": "kb",
+               "external_stores": [{"prefix": "memory", "path": str(store)}]}
+        hinted = build_and_report(cfg)
+        check("a bare name found in an external store says where it is",
+              "write it as memory:remote-thing" in hinted, hinted.strip()[:200])
+        # THE POINT OF THE FEATURE IS THAT IT DOES NOT ABSOLVE. A hint that silently turned the
+        # status to ok would delete the only signal that someone must go and write the prefix.
+        block = [b for b in hinted.split("\n\n") if "remote-thing" in b]
+        check("and it is still reported as missing, not resolved",
+              bool(block) and "status: missing" in block[0], (block or [""])[0][:200])
+        check("a name in no store at all is untouched",
+              "absent-everywhere" in hinted and
+              "write it as memory:absent-everywhere" not in hinted, hinted.strip()[:200])
+        # Rebuilds must not stack the hint onto a note that already carries it.
+        twice = build_and_report(cfg)
+        check("the hint is not appended twice by a second build",
+              twice.count("write it as memory:remote-thing") == 1,
+              "%d occurrences" % twice.count("write it as memory:remote-thing"))
+
+    # ---- a file: link to a real file outside the scanned roots --------------
+    # `roots` chooses what is scanned for SYMBOLS; it is not a list of what the repository holds.
+    # A KB entry pointing at Docs/idf-patches/README.md -- a file that plainly exists -- reported
+    # `missing` forever, because the resolver asked the files table and Docs/ is not scanned.
+    with tempfile.TemporaryDirectory() as tdf:
+        fr = Path(tdf) / "repo"; (fr / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py"):
+            (fr / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (fr / "src").mkdir(); (fr / "src" / "a.c").write_text("void a(void){}\n", encoding="utf-8")
+        (fr / "Docs").mkdir(); (fr / "Docs" / "NOTE.md").write_text("real\n", encoding="utf-8")
+        kb = fr / "kb"; (kb / "features").mkdir(parents=True)
+        (kb / "kb.json").write_text(json.dumps(
+            {"schema": 2, "scope": "shared", "collections": ["features"]}), encoding="utf-8")
+        (kb / "features" / "f.md").write_text(
+            "---\nconcept_id: t.f\nname: f\nkind: rule\nstatus: resolved\nsee_also:\n"
+            '  - {"type": "file", "target": "Docs/NOTE.md"}\n'
+            '  - {"type": "file", "target": "Docs/GONE.md"}\n'
+            '  - {"type": "file", "target": "../outside.md"}\n'
+            "---\n\n## notes\n\nbody\n", encoding="utf-8")
+        (Path(tdf) / "outside.md").write_text("not ours\n", encoding="utf-8")
+        (fr / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "kb"}), encoding="utf-8")
+        run([str(fr / ".tools" / "index_code.py"), "--force"], cwd=fr)
+        out = query("broken-links", cwd=fr)[1]
+        check("a file outside the scanned roots resolves if it exists",
+              "Docs/NOTE.md" not in out, out.strip()[:200])
+        check("a file that does not exist is still missing",
+              "Docs/GONE.md" in out, out.strip()[:200])
+        check("a path escaping the repository does not resolve",
+              "outside.md" in out, out.strip()[:200])
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

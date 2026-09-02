@@ -55,6 +55,56 @@ def _kb_path(entry: str) -> Path:
     return expanded if expanded.is_absolute() else REPO_ROOT / entry
 
 
+def _external_stores() -> list:
+    """Stores this index cannot read, but whose ENTRY NAMES it can still check.
+
+    A KB routinely points at knowledge kept somewhere else -- a private per-machine note store, a
+    second team's base. A PREFIXED target (`memory:foo`) already resolves to `external` and is
+    correctly never counted as rot. This is the other half of that problem: a link written as a
+    BARE name which happens to name an entry in one of those stores. That link IS wrong -- nothing
+    here resolves it, and it must keep saying so -- but `missing` on its own sends the reader
+    hunting for a KB entry that was never supposed to exist. Naming the store turns a dead end into
+    a one-word fix.
+
+    Configured, never guessed: the engine has no business knowing that a particular machine keeps
+    notes at a particular path. kb.config.json supplies them as
+        "external_stores": [{"prefix": "memory", "path": "~/..."}]
+    and a project that configures none loses nothing.
+    """
+    out = []
+    for item in PROJECT.get("external_stores") or []:
+        if not isinstance(item, dict):
+            continue
+        prefix = str(item.get("prefix") or "").strip()
+        raw = str(item.get("path") or "").strip()
+        if not prefix or not raw:
+            continue
+        out.append({"prefix": prefix, "path": Path(raw).expanduser()})
+    return out
+
+
+EXTERNAL_STORES = _external_stores()
+
+
+def external_store_hint(target: str) -> str:
+    """The prefixed spelling for a bare target that names an entry in a configured store, else "".
+
+    Deliberately NOT a resolver: it never turns `missing` into `ok`. A link that names the wrong
+    store is broken until someone writes the prefix, and the whole value of this report is that it
+    keeps saying so.
+    """
+    name = target.strip()
+    if not name or ":" in name or "/" in name:
+        return ""
+    for store in EXTERNAL_STORES:
+        try:
+            if (store["path"] / (name + ".md")).is_file():
+                return "%s:%s" % (store["prefix"], name)
+        except OSError:
+            continue
+    return ""
+
+
 # `annotations` may name several KBs. The engine has always accepted several (--annotations is
 # repeatable); only the CONFIG was limited to one, which is what stopped a project from putting its
 # own notes beside a shared toolchain KB.
@@ -2065,6 +2115,21 @@ def resolve_link_candidates(con: sqlite3.Connection, target_type: str, target: s
     if target_type in {"file"}:
         rows = con.execute("SELECT path FROM files WHERE path=? LIMIT 2", (target,))
         candidates.extend(_candidate("file", row[0], row[0]) for row in rows)
+        if not candidates and target:
+            # A FILE OUTSIDE THE SCANNED ROOTS STILL EXISTS. `roots` says what gets scanned for
+            # symbols, not what the repository contains -- Docs/ usually is not scanned -- so a link
+            # to a real README resolved to `missing` and stayed there forever, which is the same
+            # permanent-false-alarm failure `external` and `branch-scoped` exist to prevent. The
+            # index genuinely cannot answer this one; the filesystem can, and it is the authority
+            # for whether a file is there. Only consulted when the index has nothing, so an indexed
+            # path still wins; and the result must be INSIDE the repository, or `../../etc/passwd`
+            # would resolve and a link report would start depending on the host.
+            try:
+                probe = (REPO_ROOT / target).resolve()
+                if probe.is_file() and REPO_ROOT.resolve() in probe.parents:
+                    candidates.append(_candidate("file", target, target))
+            except (OSError, ValueError):
+                pass
     if target_type in {"comment"}:
         rows = con.execute(
             "SELECT symbol, kind, file, line FROM symbol_comments WHERE symbol LIKE ? OR comment LIKE ? LIMIT 2",
@@ -2169,11 +2234,21 @@ def validate_kb_links(con: sqlite3.Connection, self_db: object = None) -> None:
                 resolved_status = "missing" if elsewhere is False else "branch-scoped"
             else:
                 resolved_status = "missing"
+        # A BARE NAME THAT LIVES IN ANOTHER STORE STAYS MISSING, AND SAYS WHERE IT IS. Without this
+        # the report reads "missing" for a target nobody ever intended to put here, and the reader
+        # goes looking for a KB entry that does not exist. Idempotent: rebuilds must not stack the
+        # hint onto a note that already carries it.
+        hint = external_store_hint(target) if resolved_status == "missing" else ""
+        if hint:
+            marker = "not in this KB -- write it as %s" % hint
+            note = str(note or "")
+            if marker not in note:
+                note = ("%s. %s" % (note.rstrip().rstrip("."), marker)) if note.strip() else marker
         chosen = candidates[0] if candidates else {}
         con.execute(
             """
             UPDATE kb_links
-            SET status=?, resolved_kind=?, resolved_name=?, file=?, line=?
+            SET status=?, resolved_kind=?, resolved_name=?, file=?, line=?, note=?
             WHERE rowid=?
             """,
             (
@@ -2182,6 +2257,7 @@ def validate_kb_links(con: sqlite3.Connection, self_db: object = None) -> None:
                 chosen.get("name"),
                 chosen.get("file"),
                 chosen.get("line"),
+                note,
                 rowid,
             ),
         )
