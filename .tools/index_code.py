@@ -116,23 +116,55 @@ EXTRA_ANNOTATIONS = [_kb_path(x) for x in _ANNOTATION_CONF[1:]]
 # Generic default: scan the repository itself; SKIP_DIRS keeps that sane.
 DEFAULT_ROOTS = list(PROJECT.get("roots") or ["."])
 
-SOURCE_EXTS = {
+def _ext_set(configured, default: set) -> set:
+    """Extensions from the project config, normalised to lowercase with a leading dot.
+
+    A project writes "cs", ".cs" or ".CS" and means the same thing. Getting that wrong produces an
+    index with no files and NO error, which is precisely the failure these knobs exist to prevent.
+    """
+    if not configured:
+        return set(default)
+    out = set()
+    for item in configured:
+        ext = str(item).strip().lower()
+        if ext:
+            out.add(ext if ext.startswith(".") else "." + ext)
+    return out
+
+
+# THE LANGUAGE KNOBS COME FROM THE PROJECT CONFIG, defaulting to what the engine always had. An
+# earlier lineage of this indexer took source_exts/skip_dirs/max_file_bytes from the project config;
+# waymark never carried them, so a project in a language outside the built-in list could not be
+# indexed AT ALL -- and nothing said so, because an empty index is indistinguishable from a
+# repository with no code and every later query answers "no matches", which reads as an empty topic.
+# Measured on VEO 2.0 (a C# tree, 300826): the older lineage found 421 files / 5959 symbols; this
+# engine found 1 file / 5 symbols and exited 0.
+SOURCE_EXTS = _ext_set(PROJECT.get("source_exts"), {
     ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino",
     ".py", ".js", ".html", ".htm", ".css", ".sh",
-}
-SKIP_DIRS = {
+})
+# REPLACES the default set rather than adding to it -- a project that names skip_dirs is describing
+# its own tree, and silently re-adding "build"/"dist" would index directories it had just excluded.
+SKIP_DIRS = set(PROJECT.get("skip_dirs") or {
     ".git", ".tools", ".agents", ".codex", "__pycache__", ".history",
     "build", "dist", "Production", "Archive",
-}
-MAX_FILE_BYTES = 2_000_000
+})
+MAX_FILE_BYTES = int(PROJECT.get("max_file_bytes") or 2_000_000)
 INDEX_SCHEMA_VERSION = "10"     # 10: evidence_note, unified evidence vocabulary
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
 CLS_STRING = "S"
 CLS_CHAR = "H"
-C_LIKE_EXTS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino"}
-JS_LIKE_EXTS = {".js", ".html", ".htm"}
+# WHICH GRAMMAR AN EXTENSION IS PARSED WITH. Configuring source_exts alone indexes a file and its
+# comments but finds no SYMBOLS, which is a half-answer; c_like_exts is what lets a project point a
+# brace language the engine does not know about (C#, Java, Go) at the C-like parser.
+C_LIKE_EXTS = _ext_set(PROJECT.get("c_like_exts"), {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino"})
+JS_LIKE_EXTS = _ext_set(PROJECT.get("js_like_exts"), {".js", ".html", ".htm"})
+# The LEXER's brace-comment set is C_LIKE plus the two lexed like C but parsed elsewhere. Kept as one
+# name so a configured c_like_exts reaches the lexer too: an extension whose /* */ are not recognised
+# has its commented-out code read as live code, which is the bug the lexer exists to prevent.
+LEXER_C_LIKE_EXTS = C_LIKE_EXTS | {".js", ".css"}
 
 PY_DEF_RE = re.compile(r"^\s*(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 C_DEFINE_RE = re.compile(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\b(?:\s+(.*))?$")
@@ -887,7 +919,7 @@ def lex_source(text: str, ext: str) -> LexedSource:
     """
     out_lines: list[list[str]] = [[]]
     class_lines: list[list[str]] = [[]]
-    c_like = ext in {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino", ".js", ".css"}
+    c_like = ext in LEXER_C_LIKE_EXTS
     py_like = ext in {".py", ".sh"}
     html_like = ext in {".html", ".htm"}
     i = 0

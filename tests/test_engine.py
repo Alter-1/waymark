@@ -1357,6 +1357,77 @@ def main():
         rc, out, _ = query("selftest", cwd=er)
         check("selftest still flags the prose entry", "KB vocabulary" in out and rc != 0,
               out.strip()[-160:])
+    # ---- the language knobs come from the project config ----------------------------------------
+    # The built-in extension list is C/C++/py/js/sh. Point the engine at a C# project and it indexes
+    # NOTHING and says so in no way at all: an empty index is indistinguishable from a repository
+    # with no code, and every later query answers "no matches", which reads as an empty topic rather
+    # than a broken setup. Measured on VEO 2.0 (300826): the older lineage of this indexer, which did
+    # take source_exts from the config, found 421 files / 5959 symbols; this engine found 1 file and
+    # 5 symbols -- and exited 0. skip_dirs matters for the same project (VEO/bin, VEO/obj sit inside
+    # the configured roots), and c_like_exts is what makes a configured extension yield symbols
+    # rather than only files and comments.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "vendor").mkdir()
+        (rep / "src" / "app.cs").write_text(
+            "public class Widget\n{\n    private void Configure(int n) { }\n}\n", encoding="utf-8")
+        (rep / "src" / "vendor" / "skipme.cs").write_text(
+            "public class Vendored\n{\n    private void DoNotIndex(int n) { }\n}\n", encoding="utf-8")
+        (rep / "src" / "big.cs").write_text(
+            "public class Big\n{\n    private void TooLarge(int n) { }\n}\n" + ("// pad\n" * 4000),
+            encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({
+            "roots": ["src"],
+            "source_exts": ["cs"],          # deliberately WITHOUT the dot: both spellings must work
+            "c_like_exts": [".cs"],
+            "skip_dirs": ["vendor"],
+            "max_file_bytes": 20000,
+        }), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a configured project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        names, nfiles = set(), 0
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            names = set(r[0] for r in con.execute("SELECT name FROM symbols"))
+            nfiles = con.execute("SELECT count(*) FROM files").fetchone()[0]
+            con.close()
+        check("source_exts admits a configured extension", "Configure" in names,
+              "indexed %d file(s), symbols %s" % (nfiles, sorted(names)[:6]))
+        check("skip_dirs excludes a configured directory", "DoNotIndex" not in names,
+              "vendor/ was indexed despite skip_dirs")
+        check("max_file_bytes excludes an oversized file", "TooLarge" not in names,
+              "a file over the configured cap was indexed")
+
+    # ... and an UNCONFIGURED project still gets the built-in defaults. Making the knobs
+    # configurable must not make them mandatory: a repo with no kb.config.json entry for them is the
+    # common case and every existing project is one.
+    with tempfile.TemporaryDirectory() as tdx2:
+        rep = Path(tdx2)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int keeper(void){return 1;}\n", encoding="utf-8")
+        (rep / "src" / "ignored.cs").write_text("class X { void Y(){} }\n", encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        import sqlite3 as _s2
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        names2 = set()
+        if dbs:
+            con = _s2.connect(str(dbs[0]))
+            names2 = set(r[0] for r in con.execute("SELECT name FROM symbols"))
+            con.close()
+        check("built-in source_exts still apply when unconfigured", "keeper" in names2,
+              "the default extension list stopped working")
+        check("an extension outside the defaults stays out", "Y" not in names2,
+              ".cs was indexed without being configured")
 
     print()
     if FAILED:

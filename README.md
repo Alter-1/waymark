@@ -600,9 +600,41 @@ is enough to try it. `api_regex` teaches it your project's command dialect — o
 markers are indexed rather than a dialect being invented for you. `version_file` is read for a
 `BUILD_VER` define, which lets you keep version-specific overlays.
 
-Languages recognised: C, C++, Python, JavaScript, HTML, shell. Parsing is regex over a lexical
-pass that classifies code, comments, strings and char literals — good enough to navigate by, and
-deliberately not a compiler.
+Languages recognised out of the box: C, C++, Python, JavaScript, HTML, shell. Parsing is regex over
+a lexical pass that classifies code, comments, strings and char literals — good enough to navigate
+by, and deliberately not a compiler.
+
+### Indexing a language that is not in that list
+
+Four more optional fields decide **what** gets scanned and **which grammar** parses it:
+
+```json
+{
+  "roots": ["VEO"],
+  "source_exts": [".cs"],
+  "c_like_exts": [".cs"],
+  "skip_dirs": [".git", ".tools", "bin", "obj", "packages"],
+  "max_file_bytes": 2000000
+}
+```
+
+* `source_exts` — extensions to index. Replaces the built-in list. `"cs"` and `".CS"` are accepted
+  and mean `.cs`.
+* `c_like_exts` / `js_like_exts` — which extensions are parsed with the C-like or JS-like grammar,
+  and lexed for their comment style. **Setting `source_exts` alone indexes the files and their
+  comments but finds no symbols**, so a brace language wants both.
+* `skip_dirs` — directories never descended into. Replaces the built-in set rather than adding to
+  it, because a project that names them is describing its own tree.
+* `max_file_bytes` — size cap per file, default 2 MB.
+
+This buys navigation, not comprehension: a C# tree indexed as C-like yields methods and classes but
+misses properties and expression-bodied members. On a real 421-file C# project it found 5714 symbols
+where a purpose-built C# parser found 5959 — worth having, and not the same as language support.
+
+**Why these exist.** Without them, pointing the engine at a language outside the built-in list
+produced an index with one file and no symbols **and exited 0** — an empty index is
+indistinguishable from a repository with no code, so every later query answered "no matches", which
+reads as an empty topic rather than a broken setup.
 
 ## Keeping your notes private
 
