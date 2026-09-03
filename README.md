@@ -112,13 +112,37 @@ python3 .tools/query_code_index.py claim --status dead --dead-first
 python3 .tools/query_code_index.py claim --evidence measured
 ```
 
-* `--status` — `live` (believed), `dead` (disproved, with `killed_by`), `open` (unsettled).
-* `--evidence` — `measured`, `inferred`, `reported`, `unstated`.
+* `--status` — `live` (believed), `open` (unsettled), `dead` (disproved, with `killed_by`),
+  `done` (was right, and has been acted on).
+* `--evidence` — `measured`, `inferred`, `reported`, `mixed`, `unknown`.
 * `--dead-first` — start with what has already been ruled out.
+
+**`dead` and `done` are opposites, and the difference is the whole point.** `dead` means the claim
+was *refuted* — kept on purpose so nobody re-derives it. `done` means it was *right* and the code
+moved on. Recording a correct root-cause analysis as `dead` tells the next reader it was disproved,
+in the one field they consult to avoid repeating dead ends.
 
 `--dead-first` is the query to run when you pick up an investigation. A hypothesis that was tested
 and killed, with the reason recorded, is the most reusable thing in the file and the easiest to
 spend a week re-deriving.
+
+### `evidence` takes the detail after the enum — and it should
+
+The enum is what gets filtered and sorted on, so it stays a small closed set. But the question a
+reader actually has is *does this still hold on the build in front of me*, and only the date, the
+build and the rig answer that. Put both in the one field:
+
+```yaml
+evidence: measured -- 2026-08-31 on the A/B bench, fw 2.0.20260828
+evidence: measured 2026-08-31 on the A/B bench          # the bare form parses too
+```
+
+The leading word lands in `evidence`; the rest is kept beside it and shown with it. A value with no
+leading enum is `unknown` **and is reported** — see `selftest` below. This matters more than it
+sounds: before it existed, writing the useful half cost the entry its provenance, because the whole
+sentence failed the vocabulary check and was downgraded to "nobody said". In one real knowledge base
+25 entries were in that state, several written the same week by people who had just read the rules.
+A field that looks like free text gets written as free text unless something says otherwise.
 
 ## Cross-references
 
@@ -138,6 +162,29 @@ A link may target `symbol:`, `constant:`, `annotation:`, `concept:`, `route:`, `
 * **A concept and the annotation elaborating it are one subject.** They share a `concept_id`, so
   `annotation:compaction` resolves to the entry holding the content instead of complaining that the
   name is ambiguous with its own concept.
+* **A `file:` target that exists is resolved even outside the scanned roots.** `roots` chooses what
+  is scanned for *symbols*; it is not an inventory of the repository. A link to a real `Docs/…`
+  file used to report `missing` forever.
+
+### Links into a store this index cannot read
+
+A KB routinely points at knowledge kept somewhere else — a private per-machine note store, another
+team's base. A namespaced target (`memory:no-force-push`) resolves to `external`: recorded, shown,
+**never counted as rot**, because a permanent false alarm in front of the real ones is how a link
+report stops being read.
+
+The trap is the *bare* name. `no-force-push` looks like an entry in this KB, finds nothing, and
+reports `missing` — sending the reader after something that was never supposed to be here. Name the
+stores and waymark says so instead:
+
+```json
+"external_stores": [{"prefix": "memory", "path": "~/notes/project"}]
+```
+
+With that, the link still reports `missing` — the prefix really is absent — but carries
+`not in this KB -- write it as memory:no-force-push`, which is a one-word fix. It is deliberately a
+hint and not a resolver: silently marking it `ok` would delete the only signal that someone has to
+go and write the prefix. Configure none and nothing changes.
 
 ### When the target lives on another branch
 
@@ -483,6 +530,14 @@ Each check corresponds to a way a knowledge base goes wrong quietly: an index th
 missing annotation file and is silently EMPTY, a `see_also` pointing at something that no longer
 exists, a claim with no provenance so an inference reads like a measurement. It exits non-zero, so
 it belongs in a pre-commit hook or CI.
+
+**Including a `status` or `evidence` value waymark does not know.** Those are silently downgraded —
+an unknown status becomes `n/a`, which drops the entry off the `open` list, and an unknown evidence
+becomes `unknown`, so a carefully sourced entry reads as having no provenance. The loader has always
+detected them, but it prints at the end of a build that actually re-reads the KB, and an unchanged
+KB short-circuits — so the warning only ever appeared under `--force`, which nobody runs without a
+reason. **65 had accumulated unseen in one real KB.** They are recorded at load time and reported
+here instead, naming an offending value rather than only counting.
 
 ### When the headline outlives the entry
 
