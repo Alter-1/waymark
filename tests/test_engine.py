@@ -83,8 +83,15 @@ def main():
     check("api dialect is indexed when configured", stats.get("api_markers", 0) >= 1,
           f"api_markers={stats.get('api_markers')}")
 
+    # COMPARE TWO *SUBSEQUENT* BUILDS. The first build a repository ever does has no prior index to
+    # carry lifecycle history from, so its stats legitimately lack `carried_history` and differ from
+    # every build after it. Comparing run-1 against run-2 therefore FAILED on any clean checkout --
+    # a fresh clone, and CI -- while passing for anyone whose index already existed. The run above
+    # is the warm-up; determinism is a property of steady state, and that is what this asserts.
     rc2, out2, _ = run([str(TOOLS / "index_code.py"), "--force"])
-    check("a rebuild is deterministic", out2 == out)
+    rc3, out3, _ = run([str(TOOLS / "index_code.py"), "--force"])
+    check("a rebuild is deterministic", out3 == out2,
+          "two consecutive rebuilds differ" if out3 != out2 else "")
 
     # ---- the KB's own health ------------------------------------------------
     rc, out, _ = query("selftest")
