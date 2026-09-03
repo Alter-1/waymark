@@ -161,6 +161,17 @@ CLS_CHAR = "H"
 # brace language the engine does not know about (C#, Java, Go) at the C-like parser.
 C_LIKE_EXTS = _ext_set(PROJECT.get("c_like_exts"), {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino"})
 JS_LIKE_EXTS = _ext_set(PROJECT.get("js_like_exts"), {".js", ".html", ".htm"})
+# MARKUP. XML, XAML and friends are not a brace language and not JavaScript: their only comment is
+# <!-- -->, they have no char literals, and what is worth navigating to is an ATTRIBUTE (x:Name,
+# x:Class, id) rather than a function. Default is the SGML family; nothing changes for an existing
+# project, because none of these are in the default source_exts -- a project opts in by naming them
+# there, and then this grammar is already waiting for them.
+XML_LIKE_EXTS = _ext_set(PROJECT.get("xml_like_exts"), {".xml", ".xaml", ".xsd", ".xsl", ".resx"})
+# The LEXER's markup set: HTML plus whatever XML-like grammar the project configured. This used to be
+# the literal {".html", ".htm"} inline in lex_source(), which is the SECOND hard-coded copy of a
+# grammar set -- the same defect that made a configured c_like_exts miss its own block comments. An
+# extension whose <!-- --> is unrecognised has its commented-out markup read as live.
+LEXER_MARKUP_EXTS = {".html", ".htm"} | XML_LIKE_EXTS
 # The LEXER's brace-comment set is C_LIKE plus the two lexed like C but parsed elsewhere. Kept as one
 # name so a configured c_like_exts reaches the lexer too: an extension whose /* */ are not recognised
 # has its commented-out code read as live code, which is the bug the lexer exists to prevent.
@@ -921,7 +932,7 @@ def lex_source(text: str, ext: str) -> LexedSource:
     class_lines: list[list[str]] = [[]]
     c_like = ext in LEXER_C_LIKE_EXTS
     py_like = ext in {".py", ".sh"}
-    html_like = ext in {".html", ".htm"}
+    html_like = ext in LEXER_MARKUP_EXTS
     i = 0
     state = CLS_CODE
     quote = ""
@@ -1213,7 +1224,31 @@ def indexed_symbol_name(ext: str, line: str) -> str:
         return m.group(1) if m else c_function_name(line)
     if ext in JS_LIKE_EXTS:
         return js_function_name(line)
+    if ext in XML_LIKE_EXTS:
+        return xml_symbol_name(line)
     return ""
+
+
+# WHAT IS WORTH INDEXING IN MARKUP is the name something can be REFERRED TO BY, not the element.
+# Indexing every tag would bury the file in <Grid> and <StackPanel>; the navigable identifiers are
+# x:Class (the code-behind partial class), x:Name / Name (what code-behind and bindings address),
+# x:Key (what a StaticResource resolves), and id/name in plain XML. Namespace prefix optional, quotes
+# either kind, because XAML and XML disagree about both.
+XML_NAME_RE = re.compile(
+    r"""\b(?:[A-Za-z_][\w.-]*:)?(x:Class|x:Name|x:Key|Class|Name|Key|id|name)\s*=\s*["\']([^"\']+)["\']""",
+    re.IGNORECASE)
+
+
+def xml_symbol_name(line: str) -> str:
+    """The first referable name on this line, or "". Order follows the regex, so a line carrying both
+    x:Class and x:Name yields the one that appears first, which is the outer declaration."""
+    m = XML_NAME_RE.search(line)
+    if not m:
+        return ""
+    # A XAML x:Class is fully qualified (Acme.Views.MainWindow) and is indexed that way, as ONE
+    # symbol. No separate row for the leaf: symbol lookup is a substring LIKE, so `symbol MainWindow`
+    # already finds it, and a second row would be one declaration counted twice.
+    return m.group(2).strip()
 
 
 def symbol_comment_ranges_for_leading_comments(ranges: list[dict], lines: list[str], line_no: int) -> set[int]:
@@ -1338,6 +1373,11 @@ def scan_definition_line(
         name = js_function_name(line)
         if name:
             insert_symbol(con, name, "js_function", rpath, lineno, stripped[:240], comment, commented_out)
+
+    if ext in XML_LIKE_EXTS:
+        name = xml_symbol_name(line)
+        if name:
+            insert_symbol(con, name, "xml_name", rpath, lineno, stripped[:240], comment, commented_out)
 
 
 def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
