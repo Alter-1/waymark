@@ -87,8 +87,31 @@ conflict on every merge.
 The arrangement that works, in a single repository:
 
 ```bash
-git branch kb                            # an ORPHAN branch: no shared history with any code branch
+git checkout --orphan kb                 # a branch with NO shared history
+git rm -rf .                             # nothing but the KB lives on it
+mkdir features concepts
+echo '{"schema": 2, "scope": "shared", "collections": ["concepts", "features"]}' > kb.json
+git add kb.json && git commit -m "kb: initial import"
+git checkout main                        # back to your code
+
 git worktree add ~/kb/myproject kb       # its own checkout, outside the code tree
+```
+
+`kb.json` is written because **git does not track empty directories** — with only `features/` and
+`concepts/` to stage, the first commit has nothing in it and fails, leaving no branch. The engine
+does not require the file (a directory of entries indexes without it); it is the manifest, and it
+gives the branch a first commit.
+
+**`git checkout --orphan`, not `git branch`.** This document told you to write `git branch kb`
+until 2026-09-03, and that is not an orphan: it makes an ordinary branch at your current HEAD, so
+the KB branch carries your entire codebase and *does* share history with it. The worktree then
+checks out the whole tree into your KB folder and the merge problem this arrangement exists to
+avoid comes straight back. **Check rather than assume — both commands below, on a correct setup,
+answer the same way every time:**
+
+```bash
+git merge-base kb main                     # prints NOTHING on an orphan
+git ls-tree -r --name-only kb | wc -l      # your notes only -- not the size of your codebase
 ```
 
 ```json
@@ -117,6 +140,52 @@ Committing a note is done **in the KB worktree**, not in the code tree:
 git -C ~/kb/myproject add features/<name>.md
 git -C ~/kb/myproject commit -m "..."
 ```
+
+### Keeping it in step
+
+```bash
+git -C ~/kb/myproject push -u origin kb    # the FIRST publish; -u only this once
+git -C ~/kb/myproject push                 # every time after
+git -C ~/kb/myproject pull                 # before writing, if anyone else publishes
+```
+
+**On a fresh clone the KB is already there** — it came with the repository as `origin/kb`, and one
+command gives it a folder:
+
+```bash
+git worktree add ~/kb/myproject kb
+```
+
+Git creates the local `kb` tracking `origin/kb` for you. Older git refuses to guess; then be
+explicit with `git fetch origin kb:kb` first.
+
+### Undoing a half-finished attempt
+
+A migration interrupted part-way leaves a worktree registered whether or not the folder is usable,
+and git will then refuse to create it again at the same path. Nothing here touches your notes:
+
+```bash
+git worktree list                          # what git believes exists
+git worktree remove ~/kb/myproject         # unregister and delete the folder
+git worktree remove --force ~/kb/myproject # ...if it has uncommitted changes you accept losing
+git worktree prune                         # forget worktrees whose folder is already gone
+git branch -D kb                           # only if the BRANCH was created wrong, e.g. not orphan
+```
+
+`git branch -D kb` deletes notes if any were committed to it — check with
+`git log kb --oneline | head` first, and if there are commits worth keeping, push the branch
+somewhere before deleting.
+
+### Three things not to do
+
+* **Never `git checkout kb` in the code tree.** It replaces your code checkout with the KB. While
+  the worktree exists git refuses this for you — "already checked out" — so the real exposure is
+  before you create it, or after `git worktree remove`. Do not rely on the refusal; the worktree is
+  there so you never need the command at all, and the code tree switches branches without touching
+  the KB.
+* **Never merge `kb` into a code branch, or a code branch into `kb`.** They share no history; git
+  will let you, and the result is your codebase committed onto the KB branch or the reverse.
+* **Do not put the worktree inside the code checkout** — see the `git clean` caution below.
 
 ### Several KBs
 

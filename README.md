@@ -379,7 +379,8 @@ they give you a KB folder that stays put while you `git checkout` in the code tr
 git checkout --orphan kb          # a branch with no shared history
 git rm -rf .                      # nothing but the KB lives here
 mkdir features concepts
-git add . && git commit -m "kb: initial import"
+echo '{"schema": 2, "scope": "shared", "collections": ["concepts", "features"]}' > kb.json
+git add kb.json && git commit -m "kb: initial import"
 git checkout main                 # back to your code
 
 git worktree add ~/kb/myproject kb    # the KB now lives here, permanently
