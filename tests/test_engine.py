@@ -1602,6 +1602,43 @@ def main():
         rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "include-guards"], cwd=rep)
         check("a duplicated include guard is reported", "SHARED_GUARD_H" in out, out[:200])
         check("...and a unique one is not", "OWN_GUARD_H" not in out, out[:200])
+    # THE MCP SERVER MUST NOT DRIFT FROM THE CLI. It exists so an assistant in an editor can reach
+    # the KB; it owns no knowledge of its own and forwards to query_code_index.py. The failure to
+    # guard against is the one the old JS browser had: a surface that knows a stale subset of the
+    # commands and never learns the new ones.
+    def mcp(requests):
+        inp = "\n".join(json.dumps(r) for r in requests) + "\n"
+        proc = subprocess.run([sys.executable, str(TOOLS / "mcp_server.py")],
+                              input=inp, capture_output=True, text=True, cwd=str(ROOT), timeout=180)
+        return [json.loads(l) for l in proc.stdout.strip().splitlines() if l.strip()]
+
+    out = mcp([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2024-11-05", "capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "waymark_query", "arguments": {"command": "summary"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "waymark_query", "arguments": {"command": "nonsense"}}},
+    ])
+    by_id = {d.get("id"): d for d in out}
+    check("mcp answers initialize", "serverInfo" in by_id.get(1, {}).get("result", {}), by_id.get(1))
+    check("mcp does not answer a notification", len(out) == 4, [d.get("id") for d in out])
+    tools = by_id.get(2, {}).get("result", {}).get("tools", [])
+    check("mcp exposes exactly ONE tool", len(tools) == 1, [t.get("name") for t in tools])
+    rc, listed, _ = run([str(TOOLS / "query_code_index.py"), "--list-commands"])
+    cli_cmds = json.loads(listed) if rc == 0 else []
+    enum = tools[0]["inputSchema"]["properties"]["command"]["enum"] if tools else []
+    check("mcp advertises exactly the CLI's commands", enum == cli_cmds,
+          "cli=%d mcp=%d diff=%s" % (len(cli_cmds), len(enum),
+                                     sorted(set(cli_cmds) ^ set(enum))))
+    check("mcp runs a real query", not by_id.get(3, {}).get("result", {}).get("isError", True),
+          str(by_id.get(3))[:160])
+    check("mcp reports an unknown command as an error, not silence",
+          by_id.get(4, {}).get("result", {}).get("isError") is True, str(by_id.get(4))[:160])
+
+
 
 
 
