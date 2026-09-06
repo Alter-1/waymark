@@ -597,6 +597,16 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
         );
         CREATE INDEX IF NOT EXISTS guards_name_idx ON guards(name);
 
+        -- WHICH MACRO GUARDS WHICH FILE. Recorded because a duplicate is a real defect: two headers
+        -- claiming the same guard means the second one included is silently skipped, and what you
+        -- see is a missing declaration with no hint of where it went. Vendored trees and libraries
+        -- copied between projects are where this happens.
+        CREATE TABLE IF NOT EXISTS include_guards(
+            name TEXT NOT NULL,
+            file TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS include_guards_name_idx ON include_guards(name);
+
         CREATE TABLE IF NOT EXISTS symbol_comments(
             symbol TEXT NOT NULL,
             kind TEXT NOT NULL,
@@ -1304,6 +1314,13 @@ class GuardStack:
                 self._pending_guard = name
         elif directive == "if":
             self.stack.append(rest)
+            if not self._seen_directive:
+                # `#if !defined X` and `#if !defined(X)` are include guards too. lwIP's opt.h uses
+                # this spelling where its netif.h uses #ifndef; without it every symbol in the file
+                # carries "!defined LWIP_HDR_OPT_H &&" in front of the real condition.
+                m2 = re.match(r"^!\s*defined\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)?\s*$", rest)
+                if m2:
+                    self._pending_guard = m2.group(1)
         elif directive == "elif":
             if self.stack:
                 self.stack[-1] = rest
@@ -1322,14 +1339,22 @@ class GuardStack:
         self._seen_directive = True
         return directive, rest
 
-    def note_code_line(self, line: str) -> None:
-        """A non-directive code line. Confirms or cancels a suspected include guard."""
+    def note_code_line(self, line: str) -> str:
+        """A non-directive code line. Confirms or cancels a suspected include guard.
+
+        Returns the guard's name when one is confirmed, so the caller can record WHICH macro guards
+        WHICH file. Two files claiming the same guard is a real defect -- whichever is included
+        second is silently skipped, and the symptom is a missing declaration far from the cause.
+        """
         if self._pending_guard is None:
-            return
-        m = C_DEFINE_RE.match(line)
-        if m and m.group(1) == self._pending_guard:
-            self._suppress.add(len(self.stack) - 1)   # the level the guard opened
+            return ""
+        name = self._pending_guard
         self._pending_guard = None
+        m = C_DEFINE_RE.match(line)
+        if m and m.group(1) == name:
+            self._suppress.add(len(self.stack) - 1)   # the level the guard opened
+            return name
+        return ""
 
     @staticmethod
     def switches(condition: str) -> list[str]:
@@ -1579,7 +1604,9 @@ def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
                 )
             prev_code_line = ""
             continue
-        guards.note_code_line(line)
+        _guard_name = guards.note_code_line(line)
+        if _guard_name:
+            con.execute("INSERT INTO include_guards(name, file) VALUES(?,?)", (_guard_name, rpath))
         comment = merged_comment(ranges, lexed.lines, lineno, lexed.lines[lineno - 1], lexed.classes[lineno - 1])
         if comment and indexed_symbol_name(ext, line, prev_code_line):
             attached_ranges.update(symbol_comment_ranges_for_leading_comments(ranges, lexed.lines, lineno))

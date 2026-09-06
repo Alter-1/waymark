@@ -1565,6 +1565,45 @@ def main():
               {"LWIP_IPV4_NUM_ALIASES", "TARGET_C3"} <= switches, sorted(switches))
         rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "guard", "TARGET_C3"], cwd=rep)
         check("guard reports what a switch gates", "c3_only" in out and "other_only" in out, out[:160])
+    # INCLUDE GUARDS: suppressed from conditions, but RECORDED -- because a duplicate is a real
+    # defect. Two headers claiming one guard means the second included is silently skipped, and the
+    # symptom is a missing declaration nowhere near the cause.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        # the #ifndef spelling
+        (rep / "src" / "a.h").write_text(
+            "#ifndef SHARED_GUARD_H\n#define SHARED_GUARD_H\n"
+            "#if FEATURE_X\nvoid from_a(void) { }\n#endif\n#endif\n", encoding="utf-8")
+        # the `#if !defined` spelling -- the same thing, and it used to leak into every condition
+        (rep / "src" / "b.h").write_text(
+            "#if !defined SHARED_GUARD_H\n#define SHARED_GUARD_H\n"
+            "void from_b(void) { }\n#endif\n", encoding="utf-8")
+        (rep / "src" / "c.h").write_text(
+            "#if !defined(OWN_GUARD_H)\n#define OWN_GUARD_H\n"
+            "void from_c(void) { }\n#endif\n", encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a header-only project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        guard = {}
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            for nm, g in con.execute("SELECT name, guarded_by FROM symbols"):
+                guard[nm] = g
+            con.close()
+        check("#ifndef include guard is suppressed", guard.get("from_a") == "FEATURE_X", guard)
+        check("`#if !defined X` is a guard too", guard.get("from_b") == "", guard)
+        check("`#if !defined(X)` parenthesised too", guard.get("from_c") == "", guard)
+        rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "include-guards"], cwd=rep)
+        check("a duplicated include guard is reported", "SHARED_GUARD_H" in out, out[:200])
+        check("...and a unique one is not", "OWN_GUARD_H" not in out, out[:200])
+
+
 
 
 

@@ -478,6 +478,10 @@ def main() -> int:
     p.add_argument("--target", default="", help="restrict to one target from the parameter map; all by default")
     p.add_argument("--limit", type=int, default=80)
 
+    p = sub.add_parser("include-guards",
+                       help="headers whose include guard collides with another's -- the second one "
+                            "included is silently skipped")
+
     p = sub.add_parser("guard",
                        help="what a preprocessor switch gates, and whether it is defined anywhere")
     p.add_argument("name", nargs="?", default="",
@@ -597,6 +601,25 @@ def main() -> int:
         return 2
     con = sqlite3.connect(db_path)
     _ensure_json_functions(con)
+
+    if args.cmd == "include-guards":
+        # A duplicate is the point of this command: the second file included is silently skipped.
+        dupes = rows_to_dicts(con.execute(
+            "SELECT name, count(DISTINCT file) AS files, group_concat(DISTINCT file) AS in_files"
+            " FROM include_guards GROUP BY name HAVING files > 1 ORDER BY files DESC, name"))
+        if args.json:
+            print(json.dumps(dupes, indent=1))
+            return 0
+        if not dupes:
+            total = con.execute("SELECT count(DISTINCT name) FROM include_guards").fetchone()[0]
+            print("no duplicate include guards (%d headers carry one)" % total)
+            return 0
+        print("DUPLICATE include guards -- the second file included is silently skipped:")
+        for d in dupes:
+            print("  %-40s %d files" % (d["name"], d["files"]))
+            for f in (d["in_files"] or "").split(","):
+                print("      %s" % f)
+        return 0
 
     if args.cmd == "guard":
         if not args.name:
