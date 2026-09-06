@@ -191,6 +191,31 @@ C_FUNC_RE = re.compile(
     r"uint\d+_t\s+|int\d+_t\s+|size_t\s+|esp_err_t\s+|String\s+|auto\s+|[A-Za-z_][\w:<>\*\s]+?\s+)"
     r"((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:\{|$)"
 )
+# A DEFINITION SPLIT OVER TWO LINES -- the return type on one, the name on the next:
+#
+#     const ip4_addr_t *
+#     netif_ip4_src_for(const struct netif *netif, const ip4_addr_t *dest)
+#
+# lwIP, and BSD-derived C generally, is written this way throughout. C_FUNC_RE sees ONE line and
+# requires the type in front of the name, so it matched none of it: netif.c yielded 27 symbols --
+# macros and parameters -- instead of its ~30 functions, and every one of those functions was
+# missing from the index while the file itself looked perfectly well indexed.
+#
+# Two halves, deliberately strict, because the name-first line alone is indistinguishable from an
+# ordinary call:
+#   * the NAME line must start at the name and end in ')' or '){', never ';' -- a prototype or a
+#     call must not match;
+#   * the TYPE line must look like nothing but a return type: no '(', no ';', no '=', no ',', and
+#     it must end in an identifier or a '*'. That rejects the common false friend, a call whose
+#     arguments continue on the next line.
+C_SPLIT_NAME_RE = re.compile(
+    r"^((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:\{)?\s*$"
+)
+C_SPLIT_TYPE_RE = re.compile(
+    r"^\s*(?:(?:static|extern|inline|const|volatile|unsigned|signed|struct|union|enum|"
+    r"IRAM_ATTR|__attribute__\(\([^)]*\)\))\s+)*"
+    r"[A-Za-z_][A-Za-z0-9_:<>]*\s*[\*&\s]*$"
+)
 JS_FUNC_RE = re.compile(r"^\s*(?:function\s+([A-Za-z_][A-Za-z0-9_]*)|(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:function|\([^)]*\)\s*=>))")
 ASSIGN_CONST_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\s*=\s*(.+)")
 # The api index recognises a project's COMMAND DIALECT (here AT+xxx and ?xxx), which is by
@@ -1199,12 +1224,23 @@ def scan_architecture_comments(con: sqlite3.Connection, path: Path, ranges: list
         )
 
 
-def c_function_name(line: str) -> str:
+C_NOT_A_FUNCTION = {"if", "for", "while", "switch", "return",
+                    "else", "do", "sizeof", "catch", "__attribute__"}
+
+
+def c_function_name(line: str, prev_line: str = "") -> str:
     m = C_FUNC_RE.match(line)
-    if not m or m.group(1) in {"if", "for", "while", "switch", "return",
-                             "else", "do", "sizeof", "catch", "__attribute__"}:
-        return ""
-    return m.group(1)
+    if m and m.group(1) not in C_NOT_A_FUNCTION:
+        return m.group(1)
+    # The split form: this line starts with the name, the one before it holds the return type.
+    # prev_line defaults to "" so every existing caller keeps the single-line behaviour.
+    if prev_line:
+        m = C_SPLIT_NAME_RE.match(line)
+        if (m and m.group(1) not in C_NOT_A_FUNCTION
+                and C_SPLIT_TYPE_RE.match(prev_line)
+                and not prev_line.strip().endswith(",")):
+            return m.group(1)
+    return ""
 
 
 def js_function_name(line: str) -> str:
@@ -1212,7 +1248,7 @@ def js_function_name(line: str) -> str:
     return (m.group(1) or m.group(2)) if m else ""
 
 
-def indexed_symbol_name(ext: str, line: str) -> str:
+def indexed_symbol_name(ext: str, line: str, prev_line: str = "") -> str:
     stripped = line.strip()
     if not stripped:
         return ""
@@ -1221,7 +1257,7 @@ def indexed_symbol_name(ext: str, line: str) -> str:
         return m.group(1) if m else ""
     if ext in C_LIKE_EXTS:
         m = C_DEFINE_RE.match(line) or C_TYPE_RE.match(line)
-        return m.group(1) if m else c_function_name(line)
+        return m.group(1) if m else c_function_name(line, prev_line)
     if ext in JS_LIKE_EXTS:
         return js_function_name(line)
     if ext in XML_LIKE_EXTS:
@@ -1333,6 +1369,7 @@ def scan_definition_line(
     line: str,
     comment: str,
     commented_out: int = 0,
+    prev_line: str = "",
 ) -> None:
     stripped = line.strip()
     if not stripped:
@@ -1365,9 +1402,12 @@ def scan_definition_line(
         m = C_TYPE_RE.match(line)
         if m:
             insert_symbol(con, m.group(1), "type", rpath, lineno, stripped[:240], comment, commented_out)
-        name = c_function_name(line)
+        name = c_function_name(line, prev_line)
         if name:
-            insert_symbol(con, name, "function", rpath, lineno, stripped[:240], comment, commented_out)
+            # For a split definition the signature is only readable with the type line in front of
+            # it, so store both -- the reader wants "const ip4_addr_t * netif_ip4_src_for(...)".
+            snippet = stripped if C_FUNC_RE.match(line) else (prev_line.strip() + " " + stripped)
+            insert_symbol(con, name, "function", rpath, lineno, snippet[:240], comment, commented_out)
 
     if ext in JS_LIKE_EXTS:
         name = js_function_name(line)
@@ -1398,22 +1438,29 @@ def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
     ranges = comment_ranges(lexed)
     attached_ranges: set[int] = set()
     scan_architecture_comments(con, path, ranges)
+    # The PREVIOUS non-blank code line, carried so a definition split over two lines can be seen.
+    # Blank lines are skipped rather than remembered: a return type and its name are never separated
+    # by one, and remembering the blank would break every split definition that follows a gap.
+    prev_code_line = ""
     for lineno, line in enumerate(lexed.non_comment_lines, 1):
         stripped = line.strip()
         if not stripped:
             continue
         comment = merged_comment(ranges, lexed.lines, lineno, lexed.lines[lineno - 1], lexed.classes[lineno - 1])
-        if comment and indexed_symbol_name(ext, line):
+        if comment and indexed_symbol_name(ext, line, prev_code_line):
             attached_ranges.update(symbol_comment_ranges_for_leading_comments(ranges, lexed.lines, lineno))
-        scan_definition_line(con, rpath, ext, lineno, line, comment)
+        scan_definition_line(con, rpath, ext, lineno, line, comment, prev_line=prev_code_line)
         for marker in (API_RE.findall(line) if API_RE else ()):
             con.execute(
                 "INSERT INTO api_markers(marker, file, line, context) VALUES(?,?,?,?)",
                 (marker[:120], rpath, lineno, stripped[:240]),
             )
+        prev_code_line = line
     insert_source_comments(con, rpath, ranges, lexed.lines, attached_ranges, enclosing_symbols_by_line(ext, lexed))
+    prev_commented = ""
     for lineno, line in commented_out_source_lines(lexed):
-        scan_definition_line(con, rpath, ext, lineno, line, "", commented_out=1)
+        scan_definition_line(con, rpath, ext, lineno, line, "", commented_out=1, prev_line=prev_commented)
+        prev_commented = line
 
 
 def enclosing_symbol_map(con: sqlite3.Connection, rpath: str) -> list[tuple[int, str]]:

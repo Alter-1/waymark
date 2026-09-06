@@ -1473,6 +1473,51 @@ def main():
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
         return 1
+    # A DEFINITION SPLIT OVER TWO LINES -- the return type on its own line, the name on the next.
+    # lwIP and BSD-derived C are written this way throughout, and the single-line matcher saw none
+    # of it: netif.c yielded 27 symbols (macros and parameters) instead of its ~30 functions, while
+    # the file itself looked perfectly well indexed. Silent under-extraction, exit 0.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "split.c").write_text(
+            "const ip4_addr_t *\n"
+            "netif_ip4_src_for(const struct netif *netif, const ip4_addr_t *dest)\n{\n  return 0;\n}\n"
+            "\n"
+            "static err_t\n"
+            "etharp_output_to_arp_index(struct netif *netif, struct pbuf *q, u8_t i)\n{\n  return 0;\n}\n"
+            "\n"
+            "void one_line_style(struct netif *netif)\n{\n}\n"
+            "\n"
+            "const ip4_addr_t *\n"
+            "prototype_only(const struct netif *netif);\n"
+            "\n"
+            "void caller(void)\n{\n  int n = 3;\n  some_call(n,\n            n);\n}\n",
+            encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a project with split definitions indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        funcs, sigs = set(), {}
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            for nm, sg in con.execute("SELECT name, signature FROM symbols WHERE kind='function'"):
+                funcs.add(nm); sigs[nm] = sg or ""
+            con.close()
+        check("a split definition is indexed", "netif_ip4_src_for" in funcs, sorted(funcs))
+        check("...and so is a static one", "etharp_output_to_arp_index" in funcs, sorted(funcs))
+        check("one-line definitions still work", "one_line_style" in funcs, sorted(funcs))
+        check("the signature keeps the return type",
+              sigs.get("netif_ip4_src_for", "").startswith("const ip4_addr_t *"),
+              sigs.get("netif_ip4_src_for"))
+        check("a PROTOTYPE is not a definition", "prototype_only" not in funcs, sorted(funcs))
+        check("a continued CALL is not a definition", "some_call" not in funcs, sorted(funcs))
+
+
     print("all passed")
     return 0
 
