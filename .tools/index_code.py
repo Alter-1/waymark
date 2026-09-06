@@ -150,7 +150,7 @@ SKIP_DIRS = set(PROJECT.get("skip_dirs") or {
     "build", "dist", "Production", "Archive",
 })
 MAX_FILE_BYTES = int(PROJECT.get("max_file_bytes") or 2_000_000)
-INDEX_SCHEMA_VERSION = "10"     # 10: evidence_note, unified evidence vocabulary
+INDEX_SCHEMA_VERSION = "11"     # 11: guarded_by + the guards table
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
@@ -571,9 +571,31 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
             file TEXT NOT NULL,
             line INTEGER NOT NULL,
             signature TEXT NOT NULL,
-            commented_out INTEGER NOT NULL DEFAULT 0
+            commented_out INTEGER NOT NULL DEFAULT 0,
+            -- THE PREPROCESSOR CONDITION THIS DEFINITION SITS INSIDE, verbatim and NEVER evaluated.
+            -- Empty when unconditional. Nested conditions are joined with " && ".
+            --
+            -- Evaluating would be the wrong tool's job and a worse answer: one codebase builds
+            -- several targets from the same sources, so choosing a branch makes half the tree
+            -- vanish -- and WHICH half would depend on the local build config, giving a
+            -- non-reproducible index. Both branches are indexed; the condition is recorded so the
+            -- reader can judge. It is advisory, in the same spirit as commented_out.
+            guarded_by TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name);
+
+        -- THE SWITCHES THEMSELVES. Every identifier that appears in a preprocessor condition, with
+        -- the condition it appeared in. This is what makes guarded_by checkable rather than just
+        -- suggestive: ask what a define gates, and -- by joining `constants` -- whether it is
+        -- defined at all and to what. Still no evaluation anywhere.
+        CREATE TABLE IF NOT EXISTS guards(
+            name TEXT NOT NULL,
+            condition TEXT NOT NULL,
+            file TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            directive TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS guards_name_idx ON guards(name);
 
         CREATE TABLE IF NOT EXISTS symbol_comments(
             symbol TEXT NOT NULL,
@@ -1198,10 +1220,12 @@ def insert_symbol(
     signature: str,
     comment: str,
     commented_out: int = 0,
+    guarded_by: str = "",
 ) -> None:
     con.execute(
-        "INSERT INTO symbols(name, kind, file, line, signature, commented_out) VALUES(?,?,?,?,?,?)",
-        (name, kind, file, line, signature, commented_out),
+        "INSERT INTO symbols(name, kind, file, line, signature, commented_out, guarded_by)"
+        " VALUES(?,?,?,?,?,?,?)",
+        (name, kind, file, line, signature, commented_out, guarded_by[:240]),
     )
     if comment and not commented_out:
         con.execute(
@@ -1222,6 +1246,101 @@ def scan_architecture_comments(con: sqlite3.Connection, path: Path, ranges: list
             "INSERT INTO architecture_comments(title, file, line, comment) VALUES(?,?,?,?)",
             (title, rpath, item["start"], item["text"][:4000]),
         )
+
+
+CPP_COND_RE = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b\s*(.*)$")
+# Identifiers a condition mentions. Numeric literals, C keywords and the `defined` operator itself
+# are not switches; everything else that looks like a macro name is one.
+CPP_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+CPP_NOT_A_SWITCH = {"defined", "sizeof", "true", "false", "NULL", "and", "or", "not"}
+
+
+class GuardStack:
+    """The preprocessor conditions enclosing the current line -- tracked, NEVER evaluated.
+
+    A KB index serves every build of a tree at once. One codebase here builds two targets from the
+    same sources across `#if CONFIG_IDF_TARGET_ESP32C3`; picking a branch would make half of it
+    vanish, and which half would depend on the local build configuration -- a non-reproducible
+    index. So both branches are indexed and the condition travels with the symbol, for the reader
+    to judge.
+
+    Conditions are kept as WRITTEN. A condition too involved to understand is still recorded
+    verbatim, which is the graceful degradation: worst case the reader sees the same text they
+    would have read in the file.
+    """
+
+    def __init__(self) -> None:
+        self.stack: list[str] = []
+        # An INCLUDE GUARD is not a condition anybody wants to read. `#ifndef FOO_H` wraps the whole
+        # file, so without this every symbol in every header carries "!FOO_H &&" in front of the
+        # condition that actually matters. Recognised by shape -- the first directive in the file is
+        # `#ifndef X` and the very next code line is `#define X` -- and then suppressed, not popped:
+        # the nesting still has to balance.
+        self._pending_guard: str | None = None
+        self._seen_directive = False
+        self._suppress: set[int] = set()
+
+    def current(self) -> str:
+        return " && ".join(c for i, c in enumerate(self.stack) if c and i not in self._suppress)
+
+    def feed(self, line: str) -> tuple[str, str] | None:
+        """Update the stack from one line. Returns (directive, condition) for a conditional
+        directive, else None. The directive line itself is never inside its own condition."""
+        m = CPP_COND_RE.match(line)
+        if not m:
+            return None
+        directive, rest = m.group(1), m.group(2).strip()
+        # Strip a trailing comment the lexer may have left behind.
+        rest = re.sub(r"/\*.*?\*/", " ", rest).split("//")[0].strip()
+        if directive == "ifdef":
+            cond = rest.split()[0] if rest else ""
+            self.stack.append(cond)
+        elif directive == "ifndef":
+            name = rest.split()[0] if rest else ""
+            cond = "!" + name if name else ""
+            self.stack.append(cond)
+            if not self._seen_directive and name:
+                # Might be an include guard -- confirmed by the next code line being its #define.
+                self._pending_guard = name
+        elif directive == "if":
+            self.stack.append(rest)
+        elif directive == "elif":
+            if self.stack:
+                self.stack[-1] = rest
+            else:
+                self.stack.append(rest)
+        elif directive == "else":
+            if self.stack:
+                prev = self.stack[-1]
+                self.stack[-1] = ("!(%s)" % prev) if prev else ""
+            rest = self.stack[-1] if self.stack else ""
+        elif directive == "endif":
+            if self.stack:
+                self.stack.pop()
+                self._suppress.discard(len(self.stack))
+            rest = ""
+        self._seen_directive = True
+        return directive, rest
+
+    def note_code_line(self, line: str) -> None:
+        """A non-directive code line. Confirms or cancels a suspected include guard."""
+        if self._pending_guard is None:
+            return
+        m = C_DEFINE_RE.match(line)
+        if m and m.group(1) == self._pending_guard:
+            self._suppress.add(len(self.stack) - 1)   # the level the guard opened
+        self._pending_guard = None
+
+    @staticmethod
+    def switches(condition: str) -> list[str]:
+        """The identifiers a condition turns on -- the things worth looking up."""
+        out, seen = [], set()
+        for name in CPP_IDENT_RE.findall(condition or ""):
+            if name in CPP_NOT_A_SWITCH or name in seen or name[0].isdigit():
+                continue
+            seen.add(name)
+            out.append(name)
+        return out
 
 
 C_NOT_A_FUNCTION = {"if", "for", "while", "switch", "return",
@@ -1370,6 +1489,7 @@ def scan_definition_line(
     comment: str,
     commented_out: int = 0,
     prev_line: str = "",
+    guarded_by: str = "",
 ) -> None:
     stripped = line.strip()
     if not stripped:
@@ -1379,7 +1499,7 @@ def scan_definition_line(
         m = PY_DEF_RE.match(line)
         if m:
             kind = "class" if stripped.startswith("class ") else "function"
-            insert_symbol(con, m.group(1), kind, rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, m.group(1), kind, rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
         m = ASSIGN_CONST_RE.match(line)
         if m:
             con.execute(
@@ -1394,30 +1514,30 @@ def scan_definition_line(
         m = C_DEFINE_RE.match(line)
         if m:
             value = (m.group(2) or "").strip()
-            insert_symbol(con, m.group(1), "macro", rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, m.group(1), "macro", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
             con.execute(
                 "INSERT INTO constants(name, value, file, line, category, commented_out) VALUES(?,?,?,?,?,?)",
                 (m.group(1), value[:240], rpath, lineno, classify_constant(m.group(1), value), commented_out),
             )
         m = C_TYPE_RE.match(line)
         if m:
-            insert_symbol(con, m.group(1), "type", rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, m.group(1), "type", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
         name = c_function_name(line, prev_line)
         if name:
             # For a split definition the signature is only readable with the type line in front of
             # it, so store both -- the reader wants "const ip4_addr_t * netif_ip4_src_for(...)".
             snippet = stripped if C_FUNC_RE.match(line) else (prev_line.strip() + " " + stripped)
-            insert_symbol(con, name, "function", rpath, lineno, snippet[:240], comment, commented_out)
+            insert_symbol(con, name, "function", rpath, lineno, snippet[:240], comment, commented_out, guarded_by)
 
     if ext in JS_LIKE_EXTS:
         name = js_function_name(line)
         if name:
-            insert_symbol(con, name, "js_function", rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, name, "js_function", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
 
     if ext in XML_LIKE_EXTS:
         name = xml_symbol_name(line)
         if name:
-            insert_symbol(con, name, "xml_name", rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, name, "xml_name", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
 
 
 def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
@@ -1442,14 +1562,29 @@ def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
     # Blank lines are skipped rather than remembered: a return type and its name are never separated
     # by one, and remembering the blank would break every split definition that follows a gap.
     prev_code_line = ""
+    guards = GuardStack()
     for lineno, line in enumerate(lexed.non_comment_lines, 1):
         stripped = line.strip()
         if not stripped:
             continue
+        directive = guards.feed(line)
+        if directive is not None:
+            # A conditional directive defines nothing and is never inside its own condition. Record
+            # the switches it names, so "what does this define gate?" is answerable.
+            _kind, _cond = directive
+            for switch in GuardStack.switches(_cond):
+                con.execute(
+                    "INSERT INTO guards(name, condition, file, line, directive) VALUES(?,?,?,?,?)",
+                    (switch, _cond[:240], rpath, lineno, _kind),
+                )
+            prev_code_line = ""
+            continue
+        guards.note_code_line(line)
         comment = merged_comment(ranges, lexed.lines, lineno, lexed.lines[lineno - 1], lexed.classes[lineno - 1])
         if comment and indexed_symbol_name(ext, line, prev_code_line):
             attached_ranges.update(symbol_comment_ranges_for_leading_comments(ranges, lexed.lines, lineno))
-        scan_definition_line(con, rpath, ext, lineno, line, comment, prev_line=prev_code_line)
+        scan_definition_line(con, rpath, ext, lineno, line, comment,
+                             prev_line=prev_code_line, guarded_by=guards.current())
         for marker in (API_RE.findall(line) if API_RE else ()):
             con.execute(
                 "INSERT INTO api_markers(marker, file, line, context) VALUES(?,?,?,?)",

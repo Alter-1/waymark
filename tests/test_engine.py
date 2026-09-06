@@ -1516,6 +1516,57 @@ def main():
               sigs.get("netif_ip4_src_for"))
         check("a PROTOTYPE is not a definition", "prototype_only" not in funcs, sorted(funcs))
         check("a continued CALL is not a definition", "some_call" not in funcs, sorted(funcs))
+    # PREPROCESSOR CONDITIONS ARE RECORDED, NEVER EVALUATED. One tree builds several targets from
+    # the same sources; choosing a branch would make half of it vanish, and which half would depend
+    # on the local build config -- a non-reproducible index. Both branches are indexed and the
+    # condition travels with the symbol.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "guarded.c").write_text(
+            "void always_here(void) { }\n"
+            "\n"
+            "#if LWIP_IPV4_NUM_ALIASES\n"
+            "void aliased(void) { }\n"
+            "#define ALIAS_SLOTS 2\n"
+            "#endif\n"
+            "\n"
+            "#ifdef TARGET_C3\n"
+            "void c3_only(void) { }\n"
+            "#else\n"
+            "void other_only(void) { }\n"
+            "#endif\n",
+            encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a guarded project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        guard, switches = {}, set()
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            for nm, g in con.execute("SELECT name, guarded_by FROM symbols"):
+                guard[nm] = g
+            switches = set(r[0] for r in con.execute("SELECT DISTINCT name FROM guards"))
+            con.close()
+        check("an unconditional symbol has no guard", guard.get("always_here") == "", guard)
+        check("a guarded symbol records its condition",
+              guard.get("aliased") == "LWIP_IPV4_NUM_ALIASES", guard)
+        check("a #define inside a condition is guarded too",
+              guard.get("ALIAS_SLOTS") == "LWIP_IPV4_NUM_ALIASES", guard)
+        check("BOTH sides of an #if/#else are indexed",
+              "c3_only" in guard and "other_only" in guard, sorted(guard))
+        check("the #else branch is recorded as negated",
+              guard.get("other_only", "").startswith("!("), guard)
+        check("the switches themselves are indexed",
+              {"LWIP_IPV4_NUM_ALIASES", "TARGET_C3"} <= switches, sorted(switches))
+        rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "guard", "TARGET_C3"], cwd=rep)
+        check("guard reports what a switch gates", "c3_only" in out and "other_only" in out, out[:160])
+
+
 
 
     print("all passed")
