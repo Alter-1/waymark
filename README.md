@@ -673,6 +673,12 @@ Python client and a status page. It is not a toy for its own sake: its knowledge
 real-shaped investigation (writes appearing to vanish, two dead hypotheses, the actual root cause)
 so the queries above have something honest to return.
 
+## What has changed
+
+[`CHANGELOG.md`](CHANGELOG.md), newest first. There are no version tags yet, so entries are
+dated; each says what a user gets or stops getting, and the commit behind it carries the
+reasoning and the measurements.
+
 ## Licence
 
 MIT. See `LICENSE`.
