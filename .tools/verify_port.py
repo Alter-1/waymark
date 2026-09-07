@@ -61,13 +61,20 @@ def sh(cmd, cwd=None):
 
 
 def tokens_for(repo, sha, max_tokens=6):
-    """Distinctive identifiers and string literals added by this commit."""
+    """Distinctive identifiers and string literals added by this commit.
+
+    Returns (tokens, extensions). The extensions are the file types the commit actually touched --
+    see present_in() for why the search has to be restricted to those and not to a fixed list."""
     diff = sh(["git", "-C", repo, "show", sha, "--format=", "--unified=0"])
     keep_file = True
     found = []
+    exts = set()
     for line in diff.splitlines():
         if line.startswith("+++ b/"):
-            keep_file = not SKIP_PATH.search(line[6:])
+            path = line[6:]
+            keep_file = not SKIP_PATH.search(path)
+            if keep_file:
+                exts.add(os.path.splitext(path)[1])
             continue
         if line.startswith("diff ") or line.startswith("--- "):
             continue
@@ -108,7 +115,7 @@ def tokens_for(repo, sha, max_tokens=6):
             keep.append(t)
         if len(keep) >= max_tokens:
             break
-    return keep
+    return keep, exts
 
 
 def _in_parent(repo, sha, token):
@@ -122,11 +129,27 @@ def _in_parent(repo, sha, token):
         return False
 
 
-def present_in(tree, token):
-    """grep -rqF across the tree's source, excluding generated output."""
-    cmd = ["grep", "-rqF", "--include=*.cs", "--include=*.xaml", "--include=*.cpp",
-           "--include=*.h", "--include=*.xml", "--exclude-dir=obj", "--exclude-dir=bin",
-           "--exclude-dir=.git", "--", token, tree]
+def present_in(tree, token, exts=None):
+    """grep -rqF across the tree, restricted to the file types the COMMIT touched.
+
+    It used to grep a FIXED list -- .cs .xaml .cpp .h .xml -- which is the file set of the one
+    codebase this was written against. Every other kind of file was invisible to it, so a port that
+    landed in a .py, .js, .html, .sh or .md was reported ABSENT with the file sitting in the target
+    tree byte-identical.
+
+    MEASURED 2026-09-07, which is why this is not a tidy-up: Autotests/FBI/at_separator_matrix.py
+    is identical on two branches (md5 6d333438) and was reported absent from one of them, as was a
+    second port into the same branch. A false ABSENT is the direction that wastes a day -- somebody
+    redoes a port that is already there.
+
+    Deriving the set from the commit cannot make that mistake: the fix is looked for in the kind of
+    file it was made in. A commit touching an extensionless file (Makefile, a script) searches
+    everything rather than guessing."""
+    cmd = ["grep", "-rqF"]
+    if exts and all(exts):
+        cmd += ["--include=*%s" % e for e in sorted(exts)]
+    cmd += ["--exclude-dir=obj", "--exclude-dir=bin", "--exclude-dir=.git",
+            "--exclude-dir=node_modules", "--", token, tree]
     try:
         return subprocess.call(cmd, stdout=open(os.devnull, "w"),
                                stderr=subprocess.STDOUT) == 0
@@ -170,10 +193,10 @@ def main():
         if len(parts) != 3:
             continue
         sha, date, subj = parts
-        toks = tokens_for(a.repo, sha)
+        toks, exts = tokens_for(a.repo, sha)
         res = {}
         for name, path in targets:
-            hits = sum(1 for t in toks if present_in(path, t))
+            hits = sum(1 for t in toks if present_in(path, t, exts))
             res[name] = (classify(hits, len(toks)), hits, len(toks))
         rows.append((sha[:8], date, subj, toks, res))
 
