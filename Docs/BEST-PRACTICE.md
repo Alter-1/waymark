@@ -65,9 +65,9 @@ and re-fixed from scratch somewhere else. Audit by reading the **final code** on
 
 ### If you generate source, do not send it through a shell
 
-Writing file content inside a shell heredoc silently consumes one level of escaping, and the
-behaviour differs by how many levels you wrote. The generating script reads back correctly, so the
-damage is invisible until something downstream chokes on it:
+Writing file content inside an *unquoted* shell heredoc silently consumes one level of escaping, and
+the behaviour differs by how many levels you wrote. The generating script reads back correctly, so
+the damage is invisible until something downstream chokes on it:
 
     written        arrives as              result
     \\n            a real newline          a string literal split across two lines
@@ -77,6 +77,14 @@ damage is invisible until something downstream chokes on it:
 **Write the script to a file with an editor/file-writing tool, then run that file.** Not "escape more
 carefully" — that phrasing is why it recurs. If a generator must emit an escape, build it from a
 character code rather than typing it.
+
+*Quoting the delimiter is not the answer, though it is worth knowing why.* `<<'EOF'` suppresses
+expansion entirely — measured: with `<<EOF` a backtick runs and `\\n` collapses to `\n`, with
+`<<'EOF'` both stay literal. That removes the three rows above, and it does **not** remove the case
+that actually recurs: content that is itself handed to another interpreter, where the escaping you
+must survive is the *next* layer's, not the shell's. A quoted heredoc also still cannot contain its
+own delimiter. Use it where a heredoc is unavoidable; do not treat it as permission to generate
+source through one.
 
 **And do not answer this with a detector.** A checker that finds broken output after the fact, or a
 build-script gate that fails the compile, is a workaround for a defect you control — it reports late,
@@ -143,6 +151,11 @@ finished answer:
   query omitted the trailing slash. The rule was working.
 * **A probe past the exit.** A trace placed after two early returns logged nothing when either
   return fired — which reads as *the function was never called*, not *it returned before here*.
+* **A request that was reinterpreted, not refused.** A command sent to the wrong endpoint came back
+  with an empty body — read as "not supported here". It had in fact been parsed as something else
+  entirely and had *acted*, setting an unrelated numeric option, and the only trace was that option's
+  new value. An empty answer can mean the system did nothing, or that it did something you did not
+  ask for and had no way to report.
 
 **So: before believing a negative, make the check succeed once.** Grep for something you know is
 present, in the same file, with the same tool and the same flags. If a search is capped — a line
@@ -152,6 +165,25 @@ locates the next probe; it does not answer the question.
 
 This is the same discipline as proving a test fails without the fix, applied to searching. A check
 that cannot fail proves nothing; a search that cannot succeed proves less.
+
+### And a plausible positive is not a verified one
+
+The mirror of the rule above, and the more dangerous half, because nothing prompts you to look
+again. A wrong answer that has the *shape* of a right one ends the investigation:
+
+* a port number recorded byte-swapped — a connection to 9999 logged as 3879. Both are plausible port
+  numbers; only one is the one you used.
+* a captured payload arriving eight bytes short, because a header offset was applied to a buffer the
+  layer below had already stripped. The dump was well-formed, printable, and wrong at the front.
+
+Neither was visible to any host test: both lived in what the *caller* handed over, which a test that
+drives the callee directly supplies itself. What caught both, immediately, was **one real packet
+carrying a value chosen to be recognisable** — a port and a payload whose exact bytes were known in
+advance, so "close enough" could not pass.
+
+So when a result finally arrives: check it against a value you picked, not against your expectation
+of it. Round numbers, byte-swaps, and off-by-a-header-length are the shapes to distrust, and all
+three survive a reader who is looking for *whether* there is output rather than *which* output.
 
 ---
 
@@ -327,8 +359,8 @@ of it could ever reach them.
 
 ## The shortest version
 
-Verify before you fix. Explain before you edit. Make absence loud. Prove a search can succeed before
-believing it failed. Assert state in the same breath as the action that depends on it. Keep the
-evidence, especially of failure. Record the symptom, the dead ends and the uncertainty. And put the
-knowledge where the next person will actually look — which is not your memory, and not the commit
-message.
+Verify before you fix. Explain before you edit. Make absence loud. Prove a search can succeed
+before believing it failed, and check a result you did get against a value you chose. Assert state
+in the same breath as the action that depends on it. Keep the evidence, especially of failure.
+Record the symptom, the dead ends and the uncertainty. And put the knowledge where the next person
+will actually look — which is not your memory, and not the commit message.
