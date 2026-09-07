@@ -83,8 +83,15 @@ def main():
     check("api dialect is indexed when configured", stats.get("api_markers", 0) >= 1,
           f"api_markers={stats.get('api_markers')}")
 
+    # COMPARE TWO *SUBSEQUENT* BUILDS. The first build a repository ever does has no prior index to
+    # carry lifecycle history from, so its stats legitimately lack `carried_history` and differ from
+    # every build after it. Comparing run-1 against run-2 therefore FAILED on any clean checkout --
+    # a fresh clone, and CI -- while passing for anyone whose index already existed. The run above
+    # is the warm-up; determinism is a property of steady state, and that is what this asserts.
     rc2, out2, _ = run([str(TOOLS / "index_code.py"), "--force"])
-    check("a rebuild is deterministic", out2 == out)
+    rc3, out3, _ = run([str(TOOLS / "index_code.py"), "--force"])
+    check("a rebuild is deterministic", out3 == out2,
+          "two consecutive rebuilds differ" if out3 != out2 else "")
 
     # ---- the KB's own health ------------------------------------------------
     rc, out, _ = query("selftest")
@@ -204,6 +211,50 @@ def main():
         check("foreign repo: selftest PASSES for a project with no KB yet", rc == 0, out.strip()[-200:])
         check("foreign repo: a codebase with constants reports them",
               re.search(r"constants non-empty[\s\S]{0,40}ok", out) is not None, out.strip()[-200:])
+
+    # ---- source is not always UTF-8 -----------------------------------------
+    # Once wrong: read_text() decoded every source as UTF-8 with errors="replace", so a file in
+    # any other encoding was harvested as U+FFFD soup with NO signal that anything had happened.
+    # MEASURED on a 6423-file C++ project: 38 files failed strict UTF-8, in three encodings -
+    # cp1252 punctuation, and UTF-16 with a BOM.
+    #
+    # The UTF-16 case is the severe one and is why this is a correctness bug rather than cosmetics.
+    # Decoding UTF-16 as UTF-8 does not lose a few characters, it loses EVERYTHING: the text arrives
+    # as "i n t" interleaved with NULs, so no declaration matches and every symbol and comment in
+    # that file is missing from the index while the run reports success.
+    with tempfile.TemporaryDirectory() as tde:
+        enc = Path(tde)
+        (enc / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (enc / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (enc / "src").mkdir()
+        # cp1252: a middle dot used as a comment bullet, and curly quotes around a word
+        (enc / "src" / "legacy.c").write_bytes(
+            u"/* \u00b7 clamps the \u2018ceiling\u2019 value */\n"
+            u"int cp1252_fn(int n) { return n; }\n".encode("cp1252"))
+        # UTF-16 LE, BOM included, exactly as a Windows editor writes it
+        (enc / "src" / "wide.c").write_bytes(
+            u"/* the wide ceiling */\nint utf16_fn(int n) { return n; }\n".encode("utf-16"))
+
+        rc, out, err = run([str(enc / ".tools" / "index_code.py")], cwd=enc)
+        check("mixed-encoding project: index builds", rc == 0, err.strip()[-200:])
+
+        rc, out, _ = query("symbol", "cp1252_fn", cwd=enc)
+        check("cp1252 source: the symbol is indexed", "cp1252_fn" in out, out.strip()[:160])
+
+        rc, out, _ = query("symbol", "utf16_fn", cwd=enc)
+        check("UTF-16 source: the symbol is indexed at all", "utf16_fn" in out, out.strip()[:160])
+
+        # Assert the query SUCCEEDS and the text is really there. Checking only for the absence of
+        # U+FFFD passes for the WRONG REASON: before the fix the two bugs chained - the bad decode
+        # produced U+FFFD, and printing it raised UnicodeEncodeError on a cp1252 stdout, so the
+        # query died at rc=1 with stdout truncated to the symbol line. No replacement character in
+        # the output, because there was no output.
+        rc, out, err = query("comment", "ceiling", cwd=enc)
+        check("non-UTF-8 comment query does not crash", rc == 0, err.strip()[-160:])
+        check("non-UTF-8 comment is actually harvested", "clamps" in out, out.strip()[:200])
+        check("non-UTF-8 comments decode without replacement characters",
+              "\ufffd" not in out, out.strip()[:200])
 
     # a codebase that legitimately defines NO constants must not be judged for it
     with tempfile.TemporaryDirectory() as td2:
@@ -1306,11 +1357,294 @@ def main():
         rc, out, _ = query("selftest", cwd=er)
         check("selftest still flags the prose entry", "KB vocabulary" in out and rc != 0,
               out.strip()[-160:])
+    # ---- the language knobs come from the project config ----------------------------------------
+    # The built-in extension list is C/C++/py/js/sh. Point the engine at a C# project and it indexes
+    # NOTHING and says so in no way at all: an empty index is indistinguishable from a repository
+    # with no code, and every later query answers "no matches", which reads as an empty topic rather
+    # than a broken setup. Measured on VEO 2.0 (300826): the older lineage of this indexer, which did
+    # take source_exts from the config, found 421 files / 5959 symbols; this engine found 1 file and
+    # 5 symbols -- and exited 0. skip_dirs matters for the same project (VEO/bin, VEO/obj sit inside
+    # the configured roots), and c_like_exts is what makes a configured extension yield symbols
+    # rather than only files and comments.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "vendor").mkdir()
+        (rep / "src" / "app.cs").write_text(
+            "public class Widget\n{\n    private void Configure(int n) { }\n}\n", encoding="utf-8")
+        (rep / "src" / "vendor" / "skipme.cs").write_text(
+            "public class Vendored\n{\n    private void DoNotIndex(int n) { }\n}\n", encoding="utf-8")
+        (rep / "src" / "big.cs").write_text(
+            "public class Big\n{\n    private void TooLarge(int n) { }\n}\n" + ("// pad\n" * 4000),
+            encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({
+            "roots": ["src"],
+            "source_exts": ["cs"],          # deliberately WITHOUT the dot: both spellings must work
+            "c_like_exts": [".cs"],
+            "skip_dirs": ["vendor"],
+            "max_file_bytes": 20000,
+        }), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a configured project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        names, nfiles = set(), 0
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            names = set(r[0] for r in con.execute("SELECT name FROM symbols"))
+            nfiles = con.execute("SELECT count(*) FROM files").fetchone()[0]
+            con.close()
+        check("source_exts admits a configured extension", "Configure" in names,
+              "indexed %d file(s), symbols %s" % (nfiles, sorted(names)[:6]))
+        check("skip_dirs excludes a configured directory", "DoNotIndex" not in names,
+              "vendor/ was indexed despite skip_dirs")
+        check("max_file_bytes excludes an oversized file", "TooLarge" not in names,
+              "a file over the configured cap was indexed")
+
+    # MARKUP. XML/XAML are neither a brace language nor JavaScript: the only comment is <!-- -->,
+    # and what is worth navigating to is an ATTRIBUTE, not a function. The commented-out case is the
+    # one that matters -- markup inside <!-- --> must not be indexed as live, which is the whole
+    # reason the lexer's markup set had to stop being hard-coded.
+    with tempfile.TemporaryDirectory() as tdxml:
+        rep = Path(tdxml)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "MainWindow.xaml").write_text(
+            '<Window x:Class="Acme.Views.MainWindow">\n'
+            '  <!-- <Button x:Name="GhostButton" /> -->\n'
+            '  <Button x:Name="SaveButton" Content="Save" />\n'
+            '  <Style x:Key="HeaderStyle" TargetType="TextBlock" />\n'
+            '</Window>\n', encoding="utf-8")
+        (rep / "src" / "config.xml").write_text(
+            '<settings>\n  <entry id="retry_count">3</entry>\n</settings>\n', encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({
+            "roots": ["src"], "source_exts": [".xaml", ".xml"],
+        }), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a markup project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _sx
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        rows = {}
+        if dbs:
+            con = _sx.connect(str(dbs[0]))
+            rows = {r[0]: r[1] for r in con.execute("SELECT name, commented_out FROM symbols")}
+            con.close()
+        check("x:Name is indexed", "SaveButton" in rows, "symbols: %s" % sorted(rows)[:8])
+        check("x:Key is indexed", "HeaderStyle" in rows, "symbols: %s" % sorted(rows)[:8])
+        check("x:Class is indexed, fully qualified", "Acme.Views.MainWindow" in rows,
+              "symbols: %s" % sorted(rows)[:8])
+        check("a plain XML id is indexed", "retry_count" in rows, "symbols: %s" % sorted(rows)[:8])
+        # The one that would silently rot: <!-- --> is the ONLY comment form here, so if the lexer
+        # does not know this extension is markup, commented-out controls are indexed as live.
+        check("markup inside <!-- --> is NOT live", rows.get("GhostButton") == 1,
+              "GhostButton commented_out=%r (expected 1)" % rows.get("GhostButton"))
+
+    # ... and an UNCONFIGURED project still gets the built-in defaults. Making the knobs
+    # configurable must not make them mandatory: a repo with no kb.config.json entry for them is the
+    # common case and every existing project is one.
+    with tempfile.TemporaryDirectory() as tdx2:
+        rep = Path(tdx2)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "a.c").write_text("int keeper(void){return 1;}\n", encoding="utf-8")
+        (rep / "src" / "ignored.cs").write_text("class X { void Y(){} }\n", encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        import sqlite3 as _s2
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        names2 = set()
+        if dbs:
+            con = _s2.connect(str(dbs[0]))
+            names2 = set(r[0] for r in con.execute("SELECT name FROM symbols"))
+            con.close()
+        check("built-in source_exts still apply when unconfigured", "keeper" in names2,
+              "the default extension list stopped working")
+        check("an extension outside the defaults stays out", "Y" not in names2,
+              ".cs was indexed without being configured")
 
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
         return 1
+    # A DEFINITION SPLIT OVER TWO LINES -- the return type on its own line, the name on the next.
+    # lwIP and BSD-derived C are written this way throughout, and the single-line matcher saw none
+    # of it: netif.c yielded 27 symbols (macros and parameters) instead of its ~30 functions, while
+    # the file itself looked perfectly well indexed. Silent under-extraction, exit 0.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "split.c").write_text(
+            "const ip4_addr_t *\n"
+            "netif_ip4_src_for(const struct netif *netif, const ip4_addr_t *dest)\n{\n  return 0;\n}\n"
+            "\n"
+            "static err_t\n"
+            "etharp_output_to_arp_index(struct netif *netif, struct pbuf *q, u8_t i)\n{\n  return 0;\n}\n"
+            "\n"
+            "void one_line_style(struct netif *netif)\n{\n}\n"
+            "\n"
+            "const ip4_addr_t *\n"
+            "prototype_only(const struct netif *netif);\n"
+            "\n"
+            "void caller(void)\n{\n  int n = 3;\n  some_call(n,\n            n);\n}\n",
+            encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a project with split definitions indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        funcs, sigs = set(), {}
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            for nm, sg in con.execute("SELECT name, signature FROM symbols WHERE kind='function'"):
+                funcs.add(nm); sigs[nm] = sg or ""
+            con.close()
+        check("a split definition is indexed", "netif_ip4_src_for" in funcs, sorted(funcs))
+        check("...and so is a static one", "etharp_output_to_arp_index" in funcs, sorted(funcs))
+        check("one-line definitions still work", "one_line_style" in funcs, sorted(funcs))
+        check("the signature keeps the return type",
+              sigs.get("netif_ip4_src_for", "").startswith("const ip4_addr_t *"),
+              sigs.get("netif_ip4_src_for"))
+        check("a PROTOTYPE is not a definition", "prototype_only" not in funcs, sorted(funcs))
+        check("a continued CALL is not a definition", "some_call" not in funcs, sorted(funcs))
+    # PREPROCESSOR CONDITIONS ARE RECORDED, NEVER EVALUATED. One tree builds several targets from
+    # the same sources; choosing a branch would make half of it vanish, and which half would depend
+    # on the local build config -- a non-reproducible index. Both branches are indexed and the
+    # condition travels with the symbol.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        (rep / "src" / "guarded.c").write_text(
+            "void always_here(void) { }\n"
+            "\n"
+            "#if LWIP_IPV4_NUM_ALIASES\n"
+            "void aliased(void) { }\n"
+            "#define ALIAS_SLOTS 2\n"
+            "#endif\n"
+            "\n"
+            "#ifdef TARGET_C3\n"
+            "void c3_only(void) { }\n"
+            "#else\n"
+            "void other_only(void) { }\n"
+            "#endif\n",
+            encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a guarded project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        guard, switches = {}, set()
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            for nm, g in con.execute("SELECT name, guarded_by FROM symbols"):
+                guard[nm] = g
+            switches = set(r[0] for r in con.execute("SELECT DISTINCT name FROM guards"))
+            con.close()
+        check("an unconditional symbol has no guard", guard.get("always_here") == "", guard)
+        check("a guarded symbol records its condition",
+              guard.get("aliased") == "LWIP_IPV4_NUM_ALIASES", guard)
+        check("a #define inside a condition is guarded too",
+              guard.get("ALIAS_SLOTS") == "LWIP_IPV4_NUM_ALIASES", guard)
+        check("BOTH sides of an #if/#else are indexed",
+              "c3_only" in guard and "other_only" in guard, sorted(guard))
+        check("the #else branch is recorded as negated",
+              guard.get("other_only", "").startswith("!("), guard)
+        check("the switches themselves are indexed",
+              {"LWIP_IPV4_NUM_ALIASES", "TARGET_C3"} <= switches, sorted(switches))
+        rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "guard", "TARGET_C3"], cwd=rep)
+        check("guard reports what a switch gates", "c3_only" in out and "other_only" in out, out[:160])
+    # INCLUDE GUARDS: suppressed from conditions, but RECORDED -- because a duplicate is a real
+    # defect. Two headers claiming one guard means the second included is silently skipped, and the
+    # symptom is a missing declaration nowhere near the cause.
+    with tempfile.TemporaryDirectory() as tdx:
+        rep = Path(tdx)
+        (rep / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            (rep / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (rep / "src").mkdir()
+        # the #ifndef spelling
+        (rep / "src" / "a.h").write_text(
+            "#ifndef SHARED_GUARD_H\n#define SHARED_GUARD_H\n"
+            "#if FEATURE_X\nvoid from_a(void) { }\n#endif\n#endif\n", encoding="utf-8")
+        # the `#if !defined` spelling -- the same thing, and it used to leak into every condition
+        (rep / "src" / "b.h").write_text(
+            "#if !defined SHARED_GUARD_H\n#define SHARED_GUARD_H\n"
+            "void from_b(void) { }\n#endif\n", encoding="utf-8")
+        (rep / "src" / "c.h").write_text(
+            "#if !defined(OWN_GUARD_H)\n#define OWN_GUARD_H\n"
+            "void from_c(void) { }\n#endif\n", encoding="utf-8")
+        (rep / "kb.config.json").write_text(json.dumps({"roots": ["src"]}), encoding="utf-8")
+        rc, _, err = run([str(rep / ".tools" / "index_code.py"), "--force"], cwd=rep)
+        check("a header-only project indexes", rc == 0, err.strip()[-140:])
+        import sqlite3 as _s
+        dbs = [d for d in (rep / ".tools").glob("code_index*.sqlite") if not d.name.endswith(".tmp")]
+        guard = {}
+        if dbs:
+            con = _s.connect(str(dbs[0]))
+            for nm, g in con.execute("SELECT name, guarded_by FROM symbols"):
+                guard[nm] = g
+            con.close()
+        check("#ifndef include guard is suppressed", guard.get("from_a") == "FEATURE_X", guard)
+        check("`#if !defined X` is a guard too", guard.get("from_b") == "", guard)
+        check("`#if !defined(X)` parenthesised too", guard.get("from_c") == "", guard)
+        rc, out, _ = run([str(rep / ".tools" / "query_code_index.py"), "include-guards"], cwd=rep)
+        check("a duplicated include guard is reported", "SHARED_GUARD_H" in out, out[:200])
+        check("...and a unique one is not", "OWN_GUARD_H" not in out, out[:200])
+    # THE MCP SERVER MUST NOT DRIFT FROM THE CLI. It exists so an assistant in an editor can reach
+    # the KB; it owns no knowledge of its own and forwards to query_code_index.py. The failure to
+    # guard against is the one the old JS browser had: a surface that knows a stale subset of the
+    # commands and never learns the new ones.
+    def mcp(requests):
+        inp = "\n".join(json.dumps(r) for r in requests) + "\n"
+        proc = subprocess.run([sys.executable, str(TOOLS / "mcp_server.py")],
+                              input=inp, capture_output=True, text=True, cwd=str(ROOT), timeout=180)
+        return [json.loads(l) for l in proc.stdout.strip().splitlines() if l.strip()]
+
+    out = mcp([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2024-11-05", "capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "waymark_query", "arguments": {"command": "summary"}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+         "params": {"name": "waymark_query", "arguments": {"command": "nonsense"}}},
+    ])
+    by_id = {d.get("id"): d for d in out}
+    check("mcp answers initialize", "serverInfo" in by_id.get(1, {}).get("result", {}), by_id.get(1))
+    check("mcp does not answer a notification", len(out) == 4, [d.get("id") for d in out])
+    tools = by_id.get(2, {}).get("result", {}).get("tools", [])
+    check("mcp exposes exactly ONE tool", len(tools) == 1, [t.get("name") for t in tools])
+    rc, listed, _ = run([str(TOOLS / "query_code_index.py"), "--list-commands"])
+    cli_cmds = json.loads(listed) if rc == 0 else []
+    enum = tools[0]["inputSchema"]["properties"]["command"]["enum"] if tools else []
+    check("mcp advertises exactly the CLI's commands", enum == cli_cmds,
+          "cli=%d mcp=%d diff=%s" % (len(cli_cmds), len(enum),
+                                     sorted(set(cli_cmds) ^ set(enum))))
+    check("mcp runs a real query", not by_id.get(3, {}).get("result", {}).get("isError", True),
+          str(by_id.get(3))[:160])
+    check("mcp reports an unknown command as an error, not silence",
+          by_id.get(4, {}).get("result", {}).get("isError") is True, str(by_id.get(4))[:160])
+
+
+
+
+
+
+
+
     print("all passed")
     return 0
 

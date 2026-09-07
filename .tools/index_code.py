@@ -116,23 +116,66 @@ EXTRA_ANNOTATIONS = [_kb_path(x) for x in _ANNOTATION_CONF[1:]]
 # Generic default: scan the repository itself; SKIP_DIRS keeps that sane.
 DEFAULT_ROOTS = list(PROJECT.get("roots") or ["."])
 
-SOURCE_EXTS = {
+def _ext_set(configured, default: set) -> set:
+    """Extensions from the project config, normalised to lowercase with a leading dot.
+
+    A project writes "cs", ".cs" or ".CS" and means the same thing. Getting that wrong produces an
+    index with no files and NO error, which is precisely the failure these knobs exist to prevent.
+    """
+    if not configured:
+        return set(default)
+    out = set()
+    for item in configured:
+        ext = str(item).strip().lower()
+        if ext:
+            out.add(ext if ext.startswith(".") else "." + ext)
+    return out
+
+
+# THE LANGUAGE KNOBS COME FROM THE PROJECT CONFIG, defaulting to what the engine always had. An
+# earlier lineage of this indexer took source_exts/skip_dirs/max_file_bytes from the project config;
+# waymark never carried them, so a project in a language outside the built-in list could not be
+# indexed AT ALL -- and nothing said so, because an empty index is indistinguishable from a
+# repository with no code and every later query answers "no matches", which reads as an empty topic.
+# Measured on VEO 2.0 (a C# tree, 300826): the older lineage found 421 files / 5959 symbols; this
+# engine found 1 file / 5 symbols and exited 0.
+SOURCE_EXTS = _ext_set(PROJECT.get("source_exts"), {
     ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino",
     ".py", ".js", ".html", ".htm", ".css", ".sh",
-}
-SKIP_DIRS = {
+})
+# REPLACES the default set rather than adding to it -- a project that names skip_dirs is describing
+# its own tree, and silently re-adding "build"/"dist" would index directories it had just excluded.
+SKIP_DIRS = set(PROJECT.get("skip_dirs") or {
     ".git", ".tools", ".agents", ".codex", "__pycache__", ".history",
     "build", "dist", "Production", "Archive",
-}
-MAX_FILE_BYTES = 2_000_000
-INDEX_SCHEMA_VERSION = "10"     # 10: evidence_note, unified evidence vocabulary
+})
+MAX_FILE_BYTES = int(PROJECT.get("max_file_bytes") or 2_000_000)
+INDEX_SCHEMA_VERSION = "11"     # 11: guarded_by + the guards table
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
 CLS_BLOCK_COMMENT = "B"
 CLS_STRING = "S"
 CLS_CHAR = "H"
-C_LIKE_EXTS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino"}
-JS_LIKE_EXTS = {".js", ".html", ".htm"}
+# WHICH GRAMMAR AN EXTENSION IS PARSED WITH. Configuring source_exts alone indexes a file and its
+# comments but finds no SYMBOLS, which is a half-answer; c_like_exts is what lets a project point a
+# brace language the engine does not know about (C#, Java, Go) at the C-like parser.
+C_LIKE_EXTS = _ext_set(PROJECT.get("c_like_exts"), {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino"})
+JS_LIKE_EXTS = _ext_set(PROJECT.get("js_like_exts"), {".js", ".html", ".htm"})
+# MARKUP. XML, XAML and friends are not a brace language and not JavaScript: their only comment is
+# <!-- -->, they have no char literals, and what is worth navigating to is an ATTRIBUTE (x:Name,
+# x:Class, id) rather than a function. Default is the SGML family; nothing changes for an existing
+# project, because none of these are in the default source_exts -- a project opts in by naming them
+# there, and then this grammar is already waiting for them.
+XML_LIKE_EXTS = _ext_set(PROJECT.get("xml_like_exts"), {".xml", ".xaml", ".xsd", ".xsl", ".resx"})
+# The LEXER's markup set: HTML plus whatever XML-like grammar the project configured. This used to be
+# the literal {".html", ".htm"} inline in lex_source(), which is the SECOND hard-coded copy of a
+# grammar set -- the same defect that made a configured c_like_exts miss its own block comments. An
+# extension whose <!-- --> is unrecognised has its commented-out markup read as live.
+LEXER_MARKUP_EXTS = {".html", ".htm"} | XML_LIKE_EXTS
+# The LEXER's brace-comment set is C_LIKE plus the two lexed like C but parsed elsewhere. Kept as one
+# name so a configured c_like_exts reaches the lexer too: an extension whose /* */ are not recognised
+# has its commented-out code read as live code, which is the bug the lexer exists to prevent.
+LEXER_C_LIKE_EXTS = C_LIKE_EXTS | {".js", ".css"}
 
 PY_DEF_RE = re.compile(r"^\s*(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 C_DEFINE_RE = re.compile(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\b(?:\s+(.*))?$")
@@ -147,6 +190,31 @@ C_FUNC_RE = re.compile(
     r"^\s*(?:static\s+|inline\s+|extern\s+|IRAM_ATTR\s+|void\s+|int\s+|bool\s+|char\s+|"
     r"uint\d+_t\s+|int\d+_t\s+|size_t\s+|esp_err_t\s+|String\s+|auto\s+|[A-Za-z_][\w:<>\*\s]+?\s+)"
     r"((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:\{|$)"
+)
+# A DEFINITION SPLIT OVER TWO LINES -- the return type on one, the name on the next:
+#
+#     const ip4_addr_t *
+#     netif_ip4_src_for(const struct netif *netif, const ip4_addr_t *dest)
+#
+# lwIP, and BSD-derived C generally, is written this way throughout. C_FUNC_RE sees ONE line and
+# requires the type in front of the name, so it matched none of it: netif.c yielded 27 symbols --
+# macros and parameters -- instead of its ~30 functions, and every one of those functions was
+# missing from the index while the file itself looked perfectly well indexed.
+#
+# Two halves, deliberately strict, because the name-first line alone is indistinguishable from an
+# ordinary call:
+#   * the NAME line must start at the name and end in ')' or '){', never ';' -- a prototype or a
+#     call must not match;
+#   * the TYPE line must look like nothing but a return type: no '(', no ';', no '=', no ',', and
+#     it must end in an identifier or a '*'. That rejects the common false friend, a call whose
+#     arguments continue on the next line.
+C_SPLIT_NAME_RE = re.compile(
+    r"^((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*[A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:\{)?\s*$"
+)
+C_SPLIT_TYPE_RE = re.compile(
+    r"^\s*(?:(?:static|extern|inline|const|volatile|unsigned|signed|struct|union|enum|"
+    r"IRAM_ATTR|__attribute__\(\([^)]*\)\))\s+)*"
+    r"[A-Za-z_][A-Za-z0-9_:<>]*\s*[\*&\s]*$"
 )
 JS_FUNC_RE = re.compile(r"^\s*(?:function\s+([A-Za-z_][A-Za-z0-9_]*)|(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:function|\([^)]*\)\s*=>))")
 ASSIGN_CONST_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\s*=\s*(.+)")
@@ -503,9 +571,41 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
             file TEXT NOT NULL,
             line INTEGER NOT NULL,
             signature TEXT NOT NULL,
-            commented_out INTEGER NOT NULL DEFAULT 0
+            commented_out INTEGER NOT NULL DEFAULT 0,
+            -- THE PREPROCESSOR CONDITION THIS DEFINITION SITS INSIDE, verbatim and NEVER evaluated.
+            -- Empty when unconditional. Nested conditions are joined with " && ".
+            --
+            -- Evaluating would be the wrong tool's job and a worse answer: one codebase builds
+            -- several targets from the same sources, so choosing a branch makes half the tree
+            -- vanish -- and WHICH half would depend on the local build config, giving a
+            -- non-reproducible index. Both branches are indexed; the condition is recorded so the
+            -- reader can judge. It is advisory, in the same spirit as commented_out.
+            guarded_by TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name);
+
+        -- THE SWITCHES THEMSELVES. Every identifier that appears in a preprocessor condition, with
+        -- the condition it appeared in. This is what makes guarded_by checkable rather than just
+        -- suggestive: ask what a define gates, and -- by joining `constants` -- whether it is
+        -- defined at all and to what. Still no evaluation anywhere.
+        CREATE TABLE IF NOT EXISTS guards(
+            name TEXT NOT NULL,
+            condition TEXT NOT NULL,
+            file TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            directive TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS guards_name_idx ON guards(name);
+
+        -- WHICH MACRO GUARDS WHICH FILE. Recorded because a duplicate is a real defect: two headers
+        -- claiming the same guard means the second one included is silently skipped, and what you
+        -- see is a missing declaration with no hint of where it went. Vendored trees and libraries
+        -- copied between projects are where this happens.
+        CREATE TABLE IF NOT EXISTS include_guards(
+            name TEXT NOT NULL,
+            file TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS include_guards_name_idx ON include_guards(name);
 
         CREATE TABLE IF NOT EXISTS symbol_comments(
             symbol TEXT NOT NULL,
@@ -783,8 +883,57 @@ def iter_source_files(roots: list[str]) -> list[Path]:
     return sorted(files)
 
 
+# Decode source with the encoding it is actually in.
+#
+# This was a bare read_text(encoding="utf-8", errors="replace"), which assumes every codebase is
+# UTF-8. Real ones are not: a long-lived C/C++ tree is typically ASCII with cp1252 punctuation, and
+# Windows editors still write UTF-16 with a BOM. Every byte UTF-8 could not handle silently became
+# U+FFFD, so a correctly-encoded file was harvested as damaged text and nothing downstream could
+# tell that from a genuinely odd comment. Same failure class as a silently truncated search: the
+# result looks complete.
+#
+# MEASURED on a 6423-file C++ project: 38 files failed strict UTF-8, 99 characters in total, in
+# three encodings - cp1252 punctuation (a middle dot used as a comment bullet, curly quotes) and
+# UTF-16 LE with a BOM. None of those files was corrupt; they were read wrongly.
+#
+# The UTF-16 case is why the BOM check comes first and why this is a correctness bug rather than a
+# cosmetic one. Decoding UTF-16 as UTF-8 does not lose a few characters, it loses EVERYTHING: the
+# text arrives as "i n t" interleaved with NULs, no declaration matches, and every symbol and
+# comment in the file is missing from the index while the run reports success.
+#
+# ORDER. utf-8 first so anything genuinely UTF-8 - and all plain ASCII, a subset - decodes exactly;
+# then cp1252, the common legacy case; then latin-1, which maps all 256 byte values and therefore
+# cannot fail. The replace-and-tag path below is consequently unreachable in practice, and is kept
+# so that an encoding nobody predicted degrades VISIBLY instead of silently.
+ENCODING_INCOMPAT_MARKER = "!!! CONTAINS INCOMPAT ENCODING"
+ENCODING_INCOMPAT_FILES: list = []
+
+
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
+    raw = path.read_bytes()
+
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+
+    for codec in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(codec)
+        except UnicodeDecodeError:
+            continue
+
+    text = raw.decode("utf-8", errors="replace")
+    lost = text.count("\ufffd")
+    ENCODING_INCOMPAT_FILES.append((str(path), lost))
+
+    # The tag goes on the TAIL, never the head: prepending a line would shift every line number in
+    # the file by one, and line numbers are what the symbol index is FOR.
+    return (text + "\n"
+            + ENCODING_INCOMPAT_MARKER + ": " + str(lost)
+            + " character(s) could not be decoded and were replaced."
+            + " Content harvested from this file may be wrong. !!!\n")
 
 
 @dataclass
@@ -838,9 +987,9 @@ def lex_source(text: str, ext: str) -> LexedSource:
     """
     out_lines: list[list[str]] = [[]]
     class_lines: list[list[str]] = [[]]
-    c_like = ext in {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".ino", ".js", ".css"}
+    c_like = ext in LEXER_C_LIKE_EXTS
     py_like = ext in {".py", ".sh"}
-    html_like = ext in {".html", ".htm"}
+    html_like = ext in LEXER_MARKUP_EXTS
     i = 0
     state = CLS_CODE
     quote = ""
@@ -1081,10 +1230,12 @@ def insert_symbol(
     signature: str,
     comment: str,
     commented_out: int = 0,
+    guarded_by: str = "",
 ) -> None:
     con.execute(
-        "INSERT INTO symbols(name, kind, file, line, signature, commented_out) VALUES(?,?,?,?,?,?)",
-        (name, kind, file, line, signature, commented_out),
+        "INSERT INTO symbols(name, kind, file, line, signature, commented_out, guarded_by)"
+        " VALUES(?,?,?,?,?,?,?)",
+        (name, kind, file, line, signature, commented_out, guarded_by[:240]),
     )
     if comment and not commented_out:
         con.execute(
@@ -1107,12 +1258,133 @@ def scan_architecture_comments(con: sqlite3.Connection, path: Path, ranges: list
         )
 
 
-def c_function_name(line: str) -> str:
-    m = C_FUNC_RE.match(line)
-    if not m or m.group(1) in {"if", "for", "while", "switch", "return",
-                             "else", "do", "sizeof", "catch", "__attribute__"}:
+CPP_COND_RE = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b\s*(.*)$")
+# Identifiers a condition mentions. Numeric literals, C keywords and the `defined` operator itself
+# are not switches; everything else that looks like a macro name is one.
+CPP_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+CPP_NOT_A_SWITCH = {"defined", "sizeof", "true", "false", "NULL", "and", "or", "not"}
+
+
+class GuardStack:
+    """The preprocessor conditions enclosing the current line -- tracked, NEVER evaluated.
+
+    A KB index serves every build of a tree at once. One codebase here builds two targets from the
+    same sources across `#if CONFIG_IDF_TARGET_ESP32C3`; picking a branch would make half of it
+    vanish, and which half would depend on the local build configuration -- a non-reproducible
+    index. So both branches are indexed and the condition travels with the symbol, for the reader
+    to judge.
+
+    Conditions are kept as WRITTEN. A condition too involved to understand is still recorded
+    verbatim, which is the graceful degradation: worst case the reader sees the same text they
+    would have read in the file.
+    """
+
+    def __init__(self) -> None:
+        self.stack: list[str] = []
+        # An INCLUDE GUARD is not a condition anybody wants to read. `#ifndef FOO_H` wraps the whole
+        # file, so without this every symbol in every header carries "!FOO_H &&" in front of the
+        # condition that actually matters. Recognised by shape -- the first directive in the file is
+        # `#ifndef X` and the very next code line is `#define X` -- and then suppressed, not popped:
+        # the nesting still has to balance.
+        self._pending_guard: str | None = None
+        self._seen_directive = False
+        self._suppress: set[int] = set()
+
+    def current(self) -> str:
+        return " && ".join(c for i, c in enumerate(self.stack) if c and i not in self._suppress)
+
+    def feed(self, line: str) -> tuple[str, str] | None:
+        """Update the stack from one line. Returns (directive, condition) for a conditional
+        directive, else None. The directive line itself is never inside its own condition."""
+        m = CPP_COND_RE.match(line)
+        if not m:
+            return None
+        directive, rest = m.group(1), m.group(2).strip()
+        # Strip a trailing comment the lexer may have left behind.
+        rest = re.sub(r"/\*.*?\*/", " ", rest).split("//")[0].strip()
+        if directive == "ifdef":
+            cond = rest.split()[0] if rest else ""
+            self.stack.append(cond)
+        elif directive == "ifndef":
+            name = rest.split()[0] if rest else ""
+            cond = "!" + name if name else ""
+            self.stack.append(cond)
+            if not self._seen_directive and name:
+                # Might be an include guard -- confirmed by the next code line being its #define.
+                self._pending_guard = name
+        elif directive == "if":
+            self.stack.append(rest)
+            if not self._seen_directive:
+                # `#if !defined X` and `#if !defined(X)` are include guards too. lwIP's opt.h uses
+                # this spelling where its netif.h uses #ifndef; without it every symbol in the file
+                # carries "!defined LWIP_HDR_OPT_H &&" in front of the real condition.
+                m2 = re.match(r"^!\s*defined\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)?\s*$", rest)
+                if m2:
+                    self._pending_guard = m2.group(1)
+        elif directive == "elif":
+            if self.stack:
+                self.stack[-1] = rest
+            else:
+                self.stack.append(rest)
+        elif directive == "else":
+            if self.stack:
+                prev = self.stack[-1]
+                self.stack[-1] = ("!(%s)" % prev) if prev else ""
+            rest = self.stack[-1] if self.stack else ""
+        elif directive == "endif":
+            if self.stack:
+                self.stack.pop()
+                self._suppress.discard(len(self.stack))
+            rest = ""
+        self._seen_directive = True
+        return directive, rest
+
+    def note_code_line(self, line: str) -> str:
+        """A non-directive code line. Confirms or cancels a suspected include guard.
+
+        Returns the guard's name when one is confirmed, so the caller can record WHICH macro guards
+        WHICH file. Two files claiming the same guard is a real defect -- whichever is included
+        second is silently skipped, and the symptom is a missing declaration far from the cause.
+        """
+        if self._pending_guard is None:
+            return ""
+        name = self._pending_guard
+        self._pending_guard = None
+        m = C_DEFINE_RE.match(line)
+        if m and m.group(1) == name:
+            self._suppress.add(len(self.stack) - 1)   # the level the guard opened
+            return name
         return ""
-    return m.group(1)
+
+    @staticmethod
+    def switches(condition: str) -> list[str]:
+        """The identifiers a condition turns on -- the things worth looking up."""
+        out, seen = [], set()
+        for name in CPP_IDENT_RE.findall(condition or ""):
+            if name in CPP_NOT_A_SWITCH or name in seen or name[0].isdigit():
+                continue
+            seen.add(name)
+            out.append(name)
+        return out
+
+
+C_NOT_A_FUNCTION = {"if", "for", "while", "switch", "return",
+                    "else", "do", "sizeof", "catch", "__attribute__"}
+
+
+def c_function_name(line: str, prev_line: str = "") -> str:
+    m = C_FUNC_RE.match(line)
+    if m and m.group(1) not in C_NOT_A_FUNCTION:
+        return m.group(1)
+    # The split form: this line starts with the name, the one before it holds the return type.
+    # prev_line defaults to "" so every existing caller keeps the single-line behaviour.
+    if prev_line:
+        m = C_SPLIT_NAME_RE.match(line)
+        if (m and m.group(1) not in C_NOT_A_FUNCTION
+                and C_SPLIT_TYPE_RE.match(prev_line)
+                and not prev_line.strip().endswith(",")):
+            return m.group(1)
+    return ""
 
 
 def js_function_name(line: str) -> str:
@@ -1120,7 +1392,7 @@ def js_function_name(line: str) -> str:
     return (m.group(1) or m.group(2)) if m else ""
 
 
-def indexed_symbol_name(ext: str, line: str) -> str:
+def indexed_symbol_name(ext: str, line: str, prev_line: str = "") -> str:
     stripped = line.strip()
     if not stripped:
         return ""
@@ -1129,10 +1401,34 @@ def indexed_symbol_name(ext: str, line: str) -> str:
         return m.group(1) if m else ""
     if ext in C_LIKE_EXTS:
         m = C_DEFINE_RE.match(line) or C_TYPE_RE.match(line)
-        return m.group(1) if m else c_function_name(line)
+        return m.group(1) if m else c_function_name(line, prev_line)
     if ext in JS_LIKE_EXTS:
         return js_function_name(line)
+    if ext in XML_LIKE_EXTS:
+        return xml_symbol_name(line)
     return ""
+
+
+# WHAT IS WORTH INDEXING IN MARKUP is the name something can be REFERRED TO BY, not the element.
+# Indexing every tag would bury the file in <Grid> and <StackPanel>; the navigable identifiers are
+# x:Class (the code-behind partial class), x:Name / Name (what code-behind and bindings address),
+# x:Key (what a StaticResource resolves), and id/name in plain XML. Namespace prefix optional, quotes
+# either kind, because XAML and XML disagree about both.
+XML_NAME_RE = re.compile(
+    r"""\b(?:[A-Za-z_][\w.-]*:)?(x:Class|x:Name|x:Key|Class|Name|Key|id|name)\s*=\s*["\']([^"\']+)["\']""",
+    re.IGNORECASE)
+
+
+def xml_symbol_name(line: str) -> str:
+    """The first referable name on this line, or "". Order follows the regex, so a line carrying both
+    x:Class and x:Name yields the one that appears first, which is the outer declaration."""
+    m = XML_NAME_RE.search(line)
+    if not m:
+        return ""
+    # A XAML x:Class is fully qualified (Acme.Views.MainWindow) and is indexed that way, as ONE
+    # symbol. No separate row for the leaf: symbol lookup is a substring LIKE, so `symbol MainWindow`
+    # already finds it, and a second row would be one declaration counted twice.
+    return m.group(2).strip()
 
 
 def symbol_comment_ranges_for_leading_comments(ranges: list[dict], lines: list[str], line_no: int) -> set[int]:
@@ -1217,6 +1513,8 @@ def scan_definition_line(
     line: str,
     comment: str,
     commented_out: int = 0,
+    prev_line: str = "",
+    guarded_by: str = "",
 ) -> None:
     stripped = line.strip()
     if not stripped:
@@ -1226,7 +1524,7 @@ def scan_definition_line(
         m = PY_DEF_RE.match(line)
         if m:
             kind = "class" if stripped.startswith("class ") else "function"
-            insert_symbol(con, m.group(1), kind, rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, m.group(1), kind, rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
         m = ASSIGN_CONST_RE.match(line)
         if m:
             con.execute(
@@ -1241,22 +1539,30 @@ def scan_definition_line(
         m = C_DEFINE_RE.match(line)
         if m:
             value = (m.group(2) or "").strip()
-            insert_symbol(con, m.group(1), "macro", rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, m.group(1), "macro", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
             con.execute(
                 "INSERT INTO constants(name, value, file, line, category, commented_out) VALUES(?,?,?,?,?,?)",
                 (m.group(1), value[:240], rpath, lineno, classify_constant(m.group(1), value), commented_out),
             )
         m = C_TYPE_RE.match(line)
         if m:
-            insert_symbol(con, m.group(1), "type", rpath, lineno, stripped[:240], comment, commented_out)
-        name = c_function_name(line)
+            insert_symbol(con, m.group(1), "type", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
+        name = c_function_name(line, prev_line)
         if name:
-            insert_symbol(con, name, "function", rpath, lineno, stripped[:240], comment, commented_out)
+            # For a split definition the signature is only readable with the type line in front of
+            # it, so store both -- the reader wants "const ip4_addr_t * netif_ip4_src_for(...)".
+            snippet = stripped if C_FUNC_RE.match(line) else (prev_line.strip() + " " + stripped)
+            insert_symbol(con, name, "function", rpath, lineno, snippet[:240], comment, commented_out, guarded_by)
 
     if ext in JS_LIKE_EXTS:
         name = js_function_name(line)
         if name:
-            insert_symbol(con, name, "js_function", rpath, lineno, stripped[:240], comment, commented_out)
+            insert_symbol(con, name, "js_function", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
+
+    if ext in XML_LIKE_EXTS:
+        name = xml_symbol_name(line)
+        if name:
+            insert_symbol(con, name, "xml_name", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
 
 
 def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
@@ -1277,22 +1583,46 @@ def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
     ranges = comment_ranges(lexed)
     attached_ranges: set[int] = set()
     scan_architecture_comments(con, path, ranges)
+    # The PREVIOUS non-blank code line, carried so a definition split over two lines can be seen.
+    # Blank lines are skipped rather than remembered: a return type and its name are never separated
+    # by one, and remembering the blank would break every split definition that follows a gap.
+    prev_code_line = ""
+    guards = GuardStack()
     for lineno, line in enumerate(lexed.non_comment_lines, 1):
         stripped = line.strip()
         if not stripped:
             continue
+        directive = guards.feed(line)
+        if directive is not None:
+            # A conditional directive defines nothing and is never inside its own condition. Record
+            # the switches it names, so "what does this define gate?" is answerable.
+            _kind, _cond = directive
+            for switch in GuardStack.switches(_cond):
+                con.execute(
+                    "INSERT INTO guards(name, condition, file, line, directive) VALUES(?,?,?,?,?)",
+                    (switch, _cond[:240], rpath, lineno, _kind),
+                )
+            prev_code_line = ""
+            continue
+        _guard_name = guards.note_code_line(line)
+        if _guard_name:
+            con.execute("INSERT INTO include_guards(name, file) VALUES(?,?)", (_guard_name, rpath))
         comment = merged_comment(ranges, lexed.lines, lineno, lexed.lines[lineno - 1], lexed.classes[lineno - 1])
-        if comment and indexed_symbol_name(ext, line):
+        if comment and indexed_symbol_name(ext, line, prev_code_line):
             attached_ranges.update(symbol_comment_ranges_for_leading_comments(ranges, lexed.lines, lineno))
-        scan_definition_line(con, rpath, ext, lineno, line, comment)
+        scan_definition_line(con, rpath, ext, lineno, line, comment,
+                             prev_line=prev_code_line, guarded_by=guards.current())
         for marker in (API_RE.findall(line) if API_RE else ()):
             con.execute(
                 "INSERT INTO api_markers(marker, file, line, context) VALUES(?,?,?,?)",
                 (marker[:120], rpath, lineno, stripped[:240]),
             )
+        prev_code_line = line
     insert_source_comments(con, rpath, ranges, lexed.lines, attached_ranges, enclosing_symbols_by_line(ext, lexed))
+    prev_commented = ""
     for lineno, line in commented_out_source_lines(lexed):
-        scan_definition_line(con, rpath, ext, lineno, line, "", commented_out=1)
+        scan_definition_line(con, rpath, ext, lineno, line, "", commented_out=1, prev_line=prev_commented)
+        prev_commented = line
 
 
 def enclosing_symbol_map(con: sqlite3.Connection, rpath: str) -> list[tuple[int, str]]:

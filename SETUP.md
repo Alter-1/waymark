@@ -27,6 +27,10 @@ your project:
 * `roots` — subdirectories to index. Defaults to the whole repository.
 * `annotations` — where the KB lives. A single `.json` file **or** a directory of one file per
   entry. May be a **list**, and entries may be absolute or `~` paths.
+* `source_exts`, `c_like_exts`, `js_like_exts`, `skip_dirs`, `max_file_bytes` — what to scan and
+  which grammar parses it. Only needed for a language outside the built-in C/C++/Python/JS/shell
+  list; **without them such a project indexes as one file and no symbols, and still exits 0.** See
+  the README.
 * `api_regex`, `version_file`, `plugins` — optional; see the README.
 
 Then:
@@ -234,6 +238,42 @@ validated, so `selftest` will tell you — but only after a rebuild. Rename deli
 rebuild, then fix what it reports.
 
 ---
+
+## 4b. Reaching it from an editor (MCP)
+
+The CLI is the tool. This is reach: an assistant inside VS Code, Cursor, Zed, JetBrains or Claude
+Desktop has no shell, so `query_code_index.py` is unreachable there -- and even where a shell
+exists, nothing tells an assistant that a project-specific knowledge base is worth asking. An
+advertised tool gets consulted unprompted, which is the habit the whole thing depends on.
+
+`.tools/mcp_server.py` speaks MCP on stdin/stdout. Standard library only, no SDK. Register it as a
+stdio server; the shape is the same everywhere, only the config file differs:
+
+```json
+{
+  "mcpServers": {
+    "waymark": {
+      "command": "python3",
+      "args": ["/absolute/path/to/your/project/.tools/mcp_server.py"]
+    }
+  }
+}
+```
+
+Client support and config location vary by product and version -- check the one your team actually
+uses. In VS Code it is the assistant's agent mode that consumes MCP, not the editor itself.
+
+It exposes ONE tool, `waymark_query`, with the command as a parameter. That is deliberate: a tool
+definition is context, re-sent on every turn of every conversation whether or not the KB is
+touched. Two dozen tools would spend that budget forever; one costs a fraction and stays correct
+as commands are added -- the enum is built by asking the CLI what it supports, and
+`tests/test_engine.py` fails if the two ever disagree.
+
+It owns no knowledge of the KB, for the same reason `serve_code_index.py` does not: one
+implementation of each search, not two that drift.
+
+Humans do not need it. `python3 .tools/serve_code_index.py` gives you the browser, and the CLI
+gives you everything else.
 
 ## 5. Checking your setup
 

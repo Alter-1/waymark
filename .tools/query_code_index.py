@@ -12,6 +12,31 @@ import sys
 from pathlib import Path
 
 
+# Force UTF-8 on stdout.
+#
+# KB entries and source are read as text and may legitimately contain non-ASCII, but the console
+# encoding is whatever the host locale says. On a Windows work host that is cp1252, and printing
+# then fails in two different ways depending on the character:
+#
+#   * one cp1252 HAPPENS to have - an em dash becomes byte 0x97, curly quotes likewise - is written
+#     as a cp1252 byte and comes back as mojibake to anything reading the output as UTF-8. An entry
+#     read back with a replacement character mid-sentence looks like a corrupted ENTRY rather than a
+#     display problem, which sends the reader after the wrong bug.
+#   * one cp1252 does NOT have - an arrow, most symbols - raises
+#         UnicodeEncodeError: 'charmap' codec can't encode character '\u2192'
+#     and the query CRASHES. One arrow in one entry breaks the tool for that entry.
+#
+# errors="replace" so anything that still cannot be encoded degrades to a visible marker rather than
+# taking the whole query down. reconfigure() exists from Python 3.7, which is the interpreter floor
+# this engine targets; the guard keeps it working on anything older and on a redirected stdout that
+# is not a TextIOWrapper.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+
 def _ensure_json_functions(con: sqlite3.Connection) -> None:
     """Register a json_extract() fallback when SQLite was built without JSON1.
 
@@ -337,6 +362,13 @@ def fetch_symbol_rows_from_db(
                 f"""
                 SELECT b.name, b.kind, b.file, b.line, b.signature,
                        CASE WHEN b.commented_out THEN 1 ELSE NULL END AS commented_out,
+                       -- guarded_by lives on `symbols` (this build), not on the lifecycle row,
+                       -- which spans branches. Matched by position so it stays correct when the
+                       -- same name appears under different conditions in one file.
+                       (SELECT CASE WHEN s.guarded_by <> '' THEN s.guarded_by END
+                          FROM symbols s
+                         WHERE s.name = b.name AND s.file = b.file AND s.line = b.line
+                         LIMIT 1) AS guarded_by,
                        b.status, b.added_at, b.last_seen_at, b.deleted_at,
                        m.notes, m.keywords, m.see_also
                 FROM branch_symbols b
@@ -351,7 +383,8 @@ def fetch_symbol_rows_from_db(
             cur = con.execute(
                 """
                 SELECT name, kind, file, line, signature,
-                       CASE WHEN commented_out THEN 1 ELSE NULL END AS commented_out
+                       CASE WHEN commented_out THEN 1 ELSE NULL END AS commented_out,
+                       CASE WHEN guarded_by <> '' THEN guarded_by ELSE NULL END AS guarded_by
                 FROM symbols
                 WHERE name LIKE ?
                 ORDER BY file, line
@@ -444,6 +477,16 @@ def main() -> int:
                                 "the meaning (single wire)")
     p.add_argument("--target", default="", help="restrict to one target from the parameter map; all by default")
     p.add_argument("--limit", type=int, default=80)
+
+    p = sub.add_parser("include-guards",
+                       help="headers whose include guard collides with another's -- the second one "
+                            "included is silently skipped")
+
+    p = sub.add_parser("guard",
+                       help="what a preprocessor switch gates, and whether it is defined anywhere")
+    p.add_argument("name", nargs="?", default="",
+                   help="a switch name or fragment; empty lists the switches that gate the most")
+    p.add_argument("--limit", type=int, default=40)
 
     p = sub.add_parser("constant")
     p.add_argument("name", help="a name, a name fragment, or a VALUE -- "
@@ -559,13 +602,65 @@ def main() -> int:
     con = sqlite3.connect(db_path)
     _ensure_json_functions(con)
 
+    if args.cmd == "include-guards":
+        # A duplicate is the point of this command: the second file included is silently skipped.
+        dupes = rows_to_dicts(con.execute(
+            "SELECT name, count(DISTINCT file) AS files, group_concat(DISTINCT file) AS in_files"
+            " FROM include_guards GROUP BY name HAVING files > 1 ORDER BY files DESC, name"))
+        if args.json:
+            print(json.dumps(dupes, indent=1))
+            return 0
+        if not dupes:
+            total = con.execute("SELECT count(DISTINCT name) FROM include_guards").fetchone()[0]
+            print("no duplicate include guards (%d headers carry one)" % total)
+            return 0
+        print("DUPLICATE include guards -- the second file included is silently skipped:")
+        for d in dupes:
+            print("  %-40s %d files" % (d["name"], d["files"]))
+            for f in (d["in_files"] or "").split(","):
+                print("      %s" % f)
+        return 0
+
+    if args.cmd == "guard":
+        if not args.name:
+            cur = con.execute(
+                "SELECT name, count(*) AS sites FROM guards GROUP BY name"
+                " ORDER BY sites DESC, name LIMIT ?", (args.limit,))
+            print_rows(rows_to_dicts(cur), args.json, brief)
+            return 0
+        like = f"%{args.name}%"
+        # Is it defined anywhere, and to what? THIS is what makes a guard checkable instead of
+        # merely suggestive -- no evaluation, just "here is the switch, here is its #define".
+        defs = rows_to_dicts(con.execute(
+            "SELECT name, value, file, line FROM constants WHERE name LIKE ? ORDER BY file, line"
+            " LIMIT ?", (like, args.limit)))
+        gated = rows_to_dicts(con.execute(
+            "SELECT s.name, s.kind, s.file, s.line, s.guarded_by FROM symbols s"
+            " WHERE s.guarded_by LIKE ? ORDER BY s.file, s.line LIMIT ?", (like, args.limit)))
+        sites = rows_to_dicts(con.execute(
+            "SELECT DISTINCT condition, directive, file, line FROM guards WHERE name LIKE ?"
+            " ORDER BY file, line LIMIT ?", (like, args.limit)))
+        if args.json:
+            print(json.dumps({"defined_as": defs, "gates": gated, "tested_at": sites}, indent=1))
+            return 0
+        print("defined as:" if defs else "defined as: (no #define found -- comes from the build)")
+        for d in defs:
+            print("  %s = %s   %s:%s" % (d["name"], (d["value"] or "")[:60], d["file"], d["line"]))
+        print("gates %d definition(s):" % len(gated))
+        for g in gated:
+            print("  %-28s %-9s %s:%s   [%s]" % (g["name"], g["kind"], g["file"], g["line"], g["guarded_by"]))
+        print("tested at %d site(s):" % len(sites))
+        for t in sites[:args.limit]:
+            print("  #%-6s %-40.40s %s:%s" % (t["directive"], t["condition"], t["file"], t["line"]))
+        return 0
+
     if args.cmd == "summary":
         rows = []
         for table in (
             "files", "symbols", "symbol_comments", "architecture_comments",
             "constants", "refs", "api_markers", "routes", "concepts",
             "branch_overrides", "kb_links", "symbol_lifecycle", "symbol_annotations", "commit_links",
-            "symbol_metadata", "branch_symbols", "annotations", "params", "claims",
+            "symbol_metadata", "branch_symbols", "annotations", "params", "claims", "guards",
         ):
             count = con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             rows.append({"table": table, "count": count})
