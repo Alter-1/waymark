@@ -104,6 +104,29 @@ for name, css in (
     check("resolution unchanged (%s)" % name, before == after,
           "\n     before %s\n     after  %s" % (before, after))
 
+# --- a comment above a rule explains THAT rule; folding must not orphan it ---------------------
+commented = ("/* why .pt exists, in four lines nobody wants to lose */\n"
+             ".pt { border-collapse: collapse; }\n"
+             ".wsl-t table { border-collapse: collapse; margin-top: 0.5vw; }\n")
+check("refuses to orphan an explanatory comment",
+      any("orphan that comment" in c.refusal for c in refused(commented)),
+      [c.refusal for c in cands(commented)])
+check("and therefore changes nothing", cf.apply(commented, cands(commented))[0] == commented)
+# the same sheet WITHOUT the comment is fair game again
+check("folds the same rules when no comment is attached",
+      len(accepted(commented.split("\n", 1)[1])) == 1)
+
+# --- --fix must not minify a sheet a person maintains -----------------------------------------
+multi = (".a {\n    color: red;\n    padding: 1px;\n}\n.b {\n    color: red;\n}\n")
+fixed, _n = cf.apply(multi, cands(multi))
+check("keeps the authored multi-line shape", "\n    color: red;\n" in fixed, fixed)
+check("keeps the authored indentation", "    padding: 1px;" in fixed, fixed)
+one = ".a { color: red; padding: 1px; }\n.b { color: red; }\n"
+fixed1, _n = cf.apply(one, cands(one))
+check("keeps a one-line rule on one line", "\n" not in fixed1.strip().split("}")[0], fixed1)
+check("declarations are reproduced as authored, not rebuilt",
+      "color: red" in fixed1 and "color:red" not in fixed1, fixed1)
+
 print()
 if FAILED:
     print("FAILED: %s" % ", ".join(FAILED))

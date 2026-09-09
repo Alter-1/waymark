@@ -104,6 +104,9 @@ class Rule(object):
         self.start = start      # offset of the selector's first character
         self.end = end          # offset just past the closing brace
         self.idx = idx          # position in the sheet, 0-based
+        self.indent = ''        # the whitespace this rule starts its line with
+        self.oneline = True     # was it authored on a single line?
+        self.comment = False    # is it preceded by a comment block that explains it?
 
     @property
     def selectors(self):
@@ -162,7 +165,7 @@ def strip_comments(css):
 
 def parse(css):
     """-> [Rule]. Offsets refer to the ORIGINAL text, so --fix can splice it."""
-    clean = strip_comments(css)
+    clean = strip_comments(css)      # same length as css: comments become spaces, offsets hold
     rules, ctx = [], []
     i, n = 0, len(clean)
     buf_start, quote, depth = None, '', 0
@@ -213,8 +216,19 @@ def parse(css):
                     val = val[:-len('!important')].rstrip()
                 if prop and not prop.startswith('--'):
                     decls.append((prop, val, imp, raw))
-            rules.append(Rule(tuple(ctx), re.sub(r'\s+', ' ', prelude).strip(), decls, buf_start, j,
-                              len(rules)))
+            r = Rule(tuple(ctx), re.sub(r'\s+', ' ', prelude).strip(), decls, buf_start, j, len(rules))
+            line_start = css.rfind('\n', 0, buf_start) + 1
+            r.indent = css[line_start:buf_start]
+            r.oneline = '\n' not in css[buf_start:j]
+            if not r.indent.strip():
+                # A COMMENT DIRECTLY ABOVE A RULE EXPLAINS THAT RULE. Folding the rule's last
+                # declaration away deletes the rule and leaves the comment describing whatever
+                # happens to follow -- which is how four lines about the PROTOCOL PAIR came to sit
+                # above `.pt th`. Detected here so the candidate can be refused rather than
+                # cleverly rewritten.
+                before = css[:line_start].rstrip()
+                r.comment = before.endswith('*/')
+            rules.append(r)
             buf_start = None; i = j; continue
         if c == '}':
             if ctx:
@@ -302,6 +316,15 @@ def find(rules, min_save=1):
                 refusal = '%s appears both with and without !important' % prop
                 break
 
+        if not refusal:
+            folded = set((p, v, i) for (_c, p, v, i) in keys)
+            for r in group:
+                rest = [d for d in r.decls if (d[0], d[1], d[2]) not in folded]
+                if not rest and r.comment:
+                    refusal = ('%s is explained by the comment above it, and folding its last '
+                               'declaration would delete the rule and orphan that comment' % r.sel)
+                    break
+
         per = sum(decl_bytes(p, v, i) for (_c, p, v, i) in keys)
         sel_txt = ','.join(s for r in group for s in r.selectors)
         cur = per * len(group)
@@ -316,6 +339,19 @@ def find(rules, min_save=1):
 # ---------------------------------------------------------------------------------------------
 # Rewriting
 # ---------------------------------------------------------------------------------------------
+def write_rule(sel, decls, like):
+    """Emit a rule in the SHAPE the source used. --fix that minifies the rules it touches leaves
+    two lines of machine output in the middle of a sheet a person maintains; the bytes it saves are
+    removed by any compactor anyway, so the only lasting effect is the mess."""
+    if not decls:
+        return ''
+    if like.oneline:
+        return '%s { %s; }' % (sel, '; '.join(decls))
+    step = '    '
+    inner = like.indent + step
+    return '%s {\n%s%s;\n%s}' % (sel, inner, (';\n' + inner).join(decls), like.indent)
+
+
 def apply(css, cands):
     """Splice the accepted candidates into the text. Returns (new_css, applied_count)."""
     edits = []          # (start, end, replacement)
@@ -330,18 +366,17 @@ def apply(css, cands):
         drop = set((p, v, i) for (p, v, i) in c.key)
         for r in c.rules:
             for prop, val, imp, raw in r.decls:
-                if (prop, val, imp) in drop:
-                    continue
-                keep[r.idx].append('%s:%s%s' % (prop, val, '!important' if imp else ''))
+                if (prop, val, imp) not in drop:
+                    keep[r.idx].append(raw)          # AS AUTHORED, not reconstructed
         first = min(c.rules, key=lambda r: r.start)
-        body = ';'.join('%s:%s%s' % (p, v, '!important' if i else '') for (p, v, i) in c.key)
-        combined = '%s{%s}' % (','.join(c.selectors), body)
+        body = [d[3] for d in first.decls if (d[0], d[1], d[2]) in drop]
+        combined = write_rule(', '.join(c.selectors), body, first)
         for r in c.rules:
             rest = keep[r.idx]
             if r is first:
-                text = combined + ('\n%s{%s}' % (r.sel, ';'.join(rest)) if rest else '')
+                text = combined + ('\n' + r.indent + write_rule(r.sel, rest, r) if rest else '')
             else:
-                text = '%s{%s}' % (r.sel, ';'.join(rest)) if rest else ''
+                text = write_rule(r.sel, rest, r) if rest else ''
             edits.append((r.start, r.end, text))
         applied += 1
     out, prev = [], 0

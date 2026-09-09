@@ -16,9 +16,16 @@ getting; the commit messages carry the reasoning and the measurements behind the
   `--show-refused` prints the reasons, which are usually the more interesting output. Savings are
   reported in **minified bytes** and are a deliberate lower bound.
 
-  Measured on the sheet it was written for: **1 candidate worth 7 bytes, 14 refused.** Worth
-  knowing before anyone spends an afternoon grouping selectors by hand — on that page, plain
-  whitespace removal at compaction time was worth 580 bytes, twenty times more, at no risk.
+  Measured on the sheet it was written for: **0 candidates, 17 refused.** Worth knowing before
+  anyone spends an afternoon grouping selectors by hand — on that page, plain whitespace removal
+  at compaction time was worth 580 bytes at no risk.
+
+  Two of those refusals exist because `--fix` was tried on a real sheet and its output was worse
+  than the 12 bytes it saved: it emitted minified rules into a hand-maintained stylesheet, and it
+  deleted a rule whose last declaration it had folded away — leaving four lines of comment
+  explaining a rule that was no longer there. So `--fix` now reproduces the shape it found
+  (indentation, one-line or multi-line, declarations as authored), and a rule that a comment
+  explains is refused rather than emptied.
 
 ## 2026-09-07
 
