@@ -482,6 +482,13 @@ def main() -> int:
                        help="headers whose include guard collides with another's -- the second one "
                             "included is silently skipped")
 
+    p = sub.add_parser("dangling-refs",
+                       help="names this codebase used to define, no longer defines, and STILL "
+                            "references -- a refactor that removed a definition and left the call "
+                            "sites behind")
+    p.add_argument("--kind", default="", help="restrict to one kind (js_var, js_function, function...)")
+    p.add_argument("--limit", type=int, default=40)
+
     p = sub.add_parser("guard",
                        help="what a preprocessor switch gates, and whether it is defined anywhere")
     p.add_argument("name", nargs="?", default="",
@@ -601,6 +608,51 @@ def main() -> int:
         return 2
     con = sqlite3.connect(db_path)
     _ensure_json_functions(con)
+
+    if args.cmd == "dangling-refs":
+        # THE JOIN IS ON THE NAME, AND THAT IS WHY THE "no live definition" CLAUSE IS NOT OPTIONAL.
+        # One name routinely has several lifecycle rows -- the same function seen in two files, or
+        # re-parsed under a different kind -- so a row marked deleted proves nothing on its own.
+        # Without the NOT EXISTS this reported set_ro, setV and get_ch, all of which are alive and
+        # called hundreds of times: the loudest possible false positive, and it would have taught a
+        # reader to ignore the command.
+        branch = con.execute("SELECT value FROM meta WHERE key='branch'").fetchone()
+        branch = branch[0] if branch else ""
+        sql = ("SELECT b.name AS name, group_concat(DISTINCT b.kind) AS kinds,"
+               "       max(b.deleted_at) AS deleted_at,"
+               "       count(DISTINCT r.file || ':' || r.line) AS sites"
+               "  FROM branch_symbols b JOIN refs r ON r.symbol = b.name"
+               " WHERE b.status = 'deleted' AND b.branch = ?"
+               "   AND NOT EXISTS (SELECT 1 FROM branch_symbols a"
+               "                    WHERE a.name = b.name AND a.branch = b.branch"
+               "                      AND a.status <> 'deleted')"
+               "   AND NOT EXISTS (SELECT 1 FROM symbols c WHERE c.name = b.name)"
+               "   AND NOT EXISTS (SELECT 1 FROM constants k WHERE k.name = b.name)")
+        params = [branch]
+        if args.kind:
+            sql += " AND b.kind = ?"
+            params.append(args.kind)
+        sql += " GROUP BY b.name ORDER BY sites DESC, b.name LIMIT ?"
+        params.append(args.limit)
+        rows = rows_to_dicts(con.execute(sql, params))
+        for row in rows:
+            row["references"] = rows_to_dicts(con.execute(
+                "SELECT file, line, in_symbol FROM refs WHERE symbol = ?"
+                " ORDER BY file, line LIMIT 12", (row["name"],)))
+        if args.json:
+            print(json.dumps(rows, indent=1))
+            return 0
+        if not rows:
+            print("no dangling references: every name still referenced is still defined")
+            return 0
+        print("REFERENCED BUT NO LONGER DEFINED -- a removed definition with its call sites left behind:")
+        for row in rows:
+            print("  %-28s %-24s deleted %s   %d site(s)"
+                  % (row["name"], row["kinds"] or "", (row["deleted_at"] or "")[:10], row["sites"]))
+            for r in row["references"]:
+                print("      %s:%s%s" % (r["file"], r["line"],
+                                         ("  in %s" % r["in_symbol"]) if r["in_symbol"] else ""))
+        return 0
 
     if args.cmd == "include-guards":
         # A duplicate is the point of this command: the second file included is silently skipped.

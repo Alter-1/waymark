@@ -85,6 +85,29 @@ python3 .tools/query_code_index.py file store.cpp
 Output is compact by default and shows the first useful lines of long fields. Add `--full` to
 expand an entry before relying on its detail, or `--json` for machine-readable output.
 
+### What a refactor left behind
+
+```bash
+python3 .tools/query_code_index.py dangling-refs
+```
+
+Names this codebase **used to define, no longer defines, and still references** — with the
+enclosing function of every site, because "who still calls this" is the question you actually have.
+
+A compiler catches that class. A scripting language does not, and the failure is patient: the real
+one this was written for sat in an error handler, so it threw only when a request failed — and the
+message that handler existed to print was the one thing that would have pointed at it. It shipped
+in two release images.
+
+This is why waymark keeps looking for a name after its definition is gone. References are recorded
+only for names the index knows, so removing a definition would otherwise erase every call site of
+it — the evidence disappearing at exactly the moment it becomes interesting, and `0 references`
+reading as "nothing uses it".
+
+It answers from what the index remembers, so it needs a build from **before** the definition went
+and one from after; on a fresh clone with no history it has nothing to compare and says so by
+staying quiet.
+
 ## The knowledge base
 
 ```bash

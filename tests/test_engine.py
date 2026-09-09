@@ -1645,6 +1645,89 @@ def main():
 
 
 
+    # ---------------------------------------------------------------------------------------
+    # A PAGE IS TWO LANGUAGES. .html got <!-- --> handling and nothing else, so every // and
+    # /* */ inside <script> was indexed AS CODE -- on one real page that was 371 comment lines
+    # presented as source, and a name mentioned only in a comment came back as a live reference.
+    # The regex literal is here because fixing the comments without it is worse than not fixing
+    # them: `/[&<>"']/g` holds a " and a ' that are ordinary characters, and lexing them as
+    # quotes pairs them with the next real quote far below. Measured while writing this: half
+    # the file stopped being code.
+    mod, _ = resolver(ROOT, ROOT / ".tools" / f"code_index.{_branch()}.sqlite")
+    page = (
+        '<html>\n'
+        '<!-- markup ghost_a -->\n'
+        '<script>\n'
+        '// js ghost_b\n'
+        'var live_one = 1;\n'
+        '/* js ghost_c */\n'
+        'var s = \'ghost_d\';\n'
+        'var re = /[&<>"\']/g;\n'
+        'var u = \'http://ghost_f/\';\n'
+        'var live_two = 2;\n'
+        '</script>\n'
+        '</html>\n')
+    code = "\n".join(mod.lex_source(page, ".html").code_lines)
+    for ghost in ("ghost_a", "ghost_b", "ghost_c", "ghost_d", "ghost_f"):
+        check(f"html lexer hides {ghost}", ghost not in code, code[:200])
+    for live in ("live_one", "live_two"):
+        check(f"html lexer keeps {live}", live in code,
+              "a regex literal or a quote swallowed real code: " + code[:200])
+
+    # A MODULE-SCOPE JS VARIABLE IS A SYMBOL. Only js_function was indexed, so `var dmpon = 0`
+    # was invisible -- and when a refactor deleted it, three call sites left behind threw at
+    # runtime with nothing able to report it. A local stays out: one page had 52 module-scope
+    # declarations against 230 locals.
+    scoped = ('<script>\n'
+              'var mod_level = 1;\n'
+              'function f() {\n'
+              '  var local_only = 2;\n'
+              '  return local_only;\n'
+              '}\n'
+              '</script>\n')
+    import sqlite3 as _sq
+    con = _sq.connect(":memory:")
+    mod.init_db(con)
+    # rel() resolves against the repo root, so the path has to be under it.
+    mod.scan_definitions(con, ROOT / "t.html", scoped)
+    flat = " ".join(str(x) for r in con.execute("SELECT name, kind FROM symbols") for x in r)
+    check("module-scope js var is indexed", "mod_level" in flat, flat[:200])
+    check("a local js var is not indexed", "local_only" not in flat, flat[:200])
+
+    # ---------------------------------------------------------------------------------------
+    # dangling-refs, END TO END, on the shape that produced it: a name defined and referenced,
+    # then the definition removed and the call sites left. The second index run is the point --
+    # references are recorded only for names the index knows, so the run where a definition
+    # disappears is exactly the run that must still look for it.
+    import shutil
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        (proj / "src").mkdir(parents=True)
+        (proj / "Docs").mkdir()
+        (proj / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            shutil.copy(TOOLS / f, proj / ".tools" / f)
+        (proj / "kb.config.json").write_text(json.dumps(
+            {"project": {"name": "t", "roots": ["src"], "source_exts": [".html"]},
+             "annotations": ["Docs/n.json"]}), encoding="utf-8")
+        (proj / "Docs" / "n.json").write_text('{"annotations": []}', encoding="utf-8")
+        subprocess.run(["git", "init", "-q", "."], cwd=str(proj), capture_output=True)
+
+        page = ("<script>\n"
+                "var doomed = 0;\n"
+                "function user() { return doomed; }\n"
+                "</script>\n")
+        (proj / "src" / "p.html").write_text(page, encoding="utf-8")
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        rc, out, _ = query("dangling-refs", cwd=proj)
+        check("dangling-refs is silent while the definition is there", "doomed" not in out, out[:200])
+
+        (proj / "src" / "p.html").write_text(page.replace("var doomed = 0;\n", ""), encoding="utf-8")
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        rc, out, _ = query("dangling-refs", cwd=proj)
+        check("dangling-refs names the removed definition", "doomed" in out, out[:300])
+        check("dangling-refs names who still calls it", "user" in out, out[:300])
+
     print("all passed")
     return 0
 

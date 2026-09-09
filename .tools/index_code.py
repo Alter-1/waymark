@@ -218,6 +218,20 @@ C_SPLIT_TYPE_RE = re.compile(
 )
 JS_FUNC_RE = re.compile(r"^\s*(?:function\s+([A-Za-z_][A-Za-z0-9_]*)|(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:function|\([^)]*\)\s*=>))")
 ASSIGN_CONST_RE = re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\s*=\s*(.+)")
+# A MODULE-SCOPE JS VARIABLE IS A SYMBOL; A LOCAL IS NOT. The distinction is what makes this
+# worth indexing at all -- one page had 52 module-scope declarations against 230 locals, and the
+# locals are noise no one will ever search for. Column 0 is the discriminator: written source
+# indents a declaration inside a function and does not indent one at file scope. That is a
+# HEURISTIC, and it is wrong on minified input (everything is column 0) and on source indented
+# inside a wrapping IIFE -- both of which read as "more symbols", never as a missed one.
+# JS_FUNC_RE already claims `const x = function` / `= () =>`; this deliberately runs after it so a
+# function keeps its own kind.
+# After one of these a "/" is DIVISION: a value has just ended. After anything else -- an
+# operator, a comma, "(", "return" -- a regex literal is what can legally follow.
+_JS_DIV_AFTER = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$)]")
+
+JS_MODULE_VAR_RE = re.compile(r"^(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;|$)")
+
 # The api index recognises a project's COMMAND DIALECT (here AT+xxx and ?xxx), which is by
 # definition project-specific. With no api_regex configured the engine indexes no api markers
 # rather than inventing a dialect the host project does not have.
@@ -990,6 +1004,25 @@ def lex_source(text: str, ext: str) -> LexedSource:
     c_like = ext in LEXER_C_LIKE_EXTS
     py_like = ext in {".py", ".sh"}
     html_like = ext in LEXER_MARKUP_EXTS
+    # A PAGE IS TWO LANGUAGES, AND ONLY ONE OF THEM WAS BEING LEXED. .html got <!-- --> handling
+    # and nothing else, so every // and /* */ inside <script> was indexed AS CODE: commented-out
+    # JavaScript contributed symbols and references, and a name mentioned only in a comment came
+    # back as a live reference. Single quotes had the same split -- 'x' is an ordinary attribute
+    # value in markup but a STRING in script, and treating it as markup meant JS string contents
+    # were lexed as code too.
+    # So the JS rules switch on INSIDE <script>, and the markup rules switch off there. Tracking
+    # the element is enough; nothing here needs to parse either language.
+    in_script = False
+    script_open = re.compile(r"<script\b[^>]*>", re.IGNORECASE)
+    script_close = re.compile(r"</script\s*>", re.IGNORECASE)
+    # A JS REGEX LITERAL IS NEITHER A COMMENT NOR A DIVISION, AND MISREADING IT SWALLOWS THE FILE.
+    # `c.replace(/[&<>"']/g, ...)` holds one " and one ' that are ordinary characters; lexed as
+    # quotes they pair with the next real quote somewhere below and everything in between stops
+    # being code. Measured on one page: half the file went dark. `/\//` hides a slash the same way.
+    # Telling a regex from a division needs only the PREVIOUS SIGNIFICANT CHARACTER -- after a
+    # value (identifier, digit, ) or ]) a slash divides; after anything else it opens a regex.
+    # That is the standard heuristic and it is wrong only for code no one writes.
+    prev_sig = ""
     i = 0
     state = CLS_CODE
     quote = ""
@@ -1002,20 +1035,69 @@ def lex_source(text: str, ext: str) -> LexedSource:
         nxt = text[i + 1] if i + 1 < n else ""
         nxt2 = text[i + 2] if i + 2 < n else ""
 
+        if html_like and ch == "<" and state == CLS_CODE:
+            m = script_open.match(text, i)
+            if m:
+                for c in m.group(0):
+                    _append_char(out_lines, class_lines, c, CLS_CODE)
+                i = m.end()
+                in_script = True
+                continue
+            m = script_close.match(text, i)
+            if m:
+                for c in m.group(0):
+                    _append_char(out_lines, class_lines, c, CLS_CODE)
+                i = m.end()
+                in_script = False
+                continue
+
+        # Inside <script> a markup file IS a JS file, and is not markup.
+        js_ctx = c_like or (html_like and in_script)
+        markup_ctx = html_like and not in_script
+
         if state == CLS_CODE:
-            if c_like and ch == "/" and nxt == "/":
+            if js_ctx and ch == "/" and nxt not in ("/", "*") and prev_sig not in _JS_DIV_AFTER:
+                j = i + 1
+                in_class = False
+                esc = False
+                while j < n:
+                    cj = text[j]
+                    if esc:
+                        esc = False
+                    elif cj == "\\":
+                        esc = True
+                    elif cj == "[":
+                        in_class = True
+                    elif cj == "]":
+                        in_class = False
+                    elif cj == "/" and not in_class:
+                        break
+                    elif cj == "\n":
+                        j = -1
+                        break
+                    j += 1
+                if j > 0 and j < n:
+                    # Classified as a STRING: its contents are not code, which is the whole point,
+                    # and api-marker discovery already reads strings.
+                    for k in range(i, j + 1):
+                        _append_char(out_lines, class_lines, text[k], CLS_STRING)
+                    i = j + 1
+                    prev_sig = "/"
+                    continue
+
+            if js_ctx and ch == "/" and nxt == "/":
                 _append_char(out_lines, class_lines, ch, CLS_LINE_COMMENT)
                 _append_char(out_lines, class_lines, nxt, CLS_LINE_COMMENT)
                 i += 2
                 state = CLS_LINE_COMMENT
                 continue
-            if c_like and ch == "/" and nxt == "*":
+            if js_ctx and ch == "/" and nxt == "*":
                 _append_char(out_lines, class_lines, ch, CLS_BLOCK_COMMENT)
                 _append_char(out_lines, class_lines, nxt, CLS_BLOCK_COMMENT)
                 i += 2
                 state = CLS_BLOCK_COMMENT
                 continue
-            if html_like and text.startswith("<!--", i):
+            if markup_ctx and text.startswith("<!--", i):
                 for c in "<!--":
                     _append_char(out_lines, class_lines, c, CLS_BLOCK_COMMENT)
                 i += 4
@@ -1043,7 +1125,7 @@ def lex_source(text: str, ext: str) -> LexedSource:
                 triple_quote = ""
                 escape = False
                 continue
-            if ch == "'" and not html_like:
+            if ch == "'" and not markup_ctx:
                 _append_char(out_lines, class_lines, ch, CLS_CHAR if c_like else CLS_STRING)
                 i += 1
                 state = CLS_CHAR if c_like else CLS_STRING
@@ -1052,6 +1134,8 @@ def lex_source(text: str, ext: str) -> LexedSource:
                 escape = False
                 continue
             _append_char(out_lines, class_lines, ch, CLS_CODE)
+            if not ch.isspace():
+                prev_sig = ch
             i += 1
             continue
 
@@ -1063,7 +1147,7 @@ def lex_source(text: str, ext: str) -> LexedSource:
             continue
 
         if state == CLS_BLOCK_COMMENT:
-            if c_like and ch == "*" and nxt == "/":
+            if js_ctx and ch == "*" and nxt == "/":
                 _append_char(out_lines, class_lines, ch, CLS_BLOCK_COMMENT)
                 _append_char(out_lines, class_lines, nxt, CLS_BLOCK_COMMENT)
                 i += 2
@@ -1558,6 +1642,10 @@ def scan_definition_line(
         name = js_function_name(line)
         if name:
             insert_symbol(con, name, "js_function", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
+        else:
+            m = JS_MODULE_VAR_RE.match(line)
+            if m:
+                insert_symbol(con, m.group(1), "js_var", rpath, lineno, stripped[:240], comment, commented_out, guarded_by)
 
     if ext in XML_LIKE_EXTS:
         name = xml_symbol_name(line)
@@ -1645,8 +1733,24 @@ def scan_refs(con: sqlite3.Connection, files: list[Path],
     # function at all. That is a regression the qualified-name change introduced and this undoes:
     # the tail after the last "::" goes into the match set too, and the ref is recorded under the
     # token actually written in the source.
+    # NAMES WE NO LONGER DEFINE ARE SEARCHED FOR TOO, and that is the point rather than an
+    # oversight. A reference is recorded only when it matches a KNOWN name, so the moment a
+    # definition is removed every call site of it stops being recorded -- the evidence vanishes at
+    # exactly the moment it becomes interesting, and "0 references" reads as "nothing uses it".
+    # Carrying those names through this pass is what lets `dangling-refs` see who still calls
+    # something that is gone. They cost one extra token match each.
+    #
+    # EVERY branch_symbols ROW, NOT JUST THE ONES ALREADY MARKED deleted. This pass runs BEFORE the
+    # lifecycle update, so on the very run where a definition disappears nothing is marked deleted
+    # yet -- filtering on status='deleted' here found the name one whole run late, which is the
+    # "answer is stale by exactly one build" trap. Taking every remembered name instead needs no
+    # ordering: a name still defined is in `symbols` anyway, and one that is not is precisely the
+    # case worth catching. Read this alongside the NOT EXISTS clauses in `dangling-refs`, which are
+    # what keep the extra names from being reported as findings on their own.
     names: set[str] = set()
-    for row in con.execute("SELECT name FROM symbols UNION SELECT name FROM constants"):
+    for row in con.execute("SELECT name FROM symbols UNION SELECT name FROM constants"
+                           " UNION SELECT name FROM branch_symbols WHERE branch=?",
+                           (current_branch_slug(),)):
         full = row[0]
         if len(full) >= 3:
             names.add(full)

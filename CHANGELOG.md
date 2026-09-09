@@ -5,6 +5,44 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-09 (later)
+
+### Added
+* **`dangling-refs`** — names this codebase used to define, no longer defines, and **still
+  references**. That is a refactor which removed a definition and left the call sites behind: in a
+  compiled language the build catches it, and in a scripting language nothing does. It is reported
+  with the enclosing function of every site, because "who still calls this" is the question you
+  actually have.
+
+  Written after a real one. Four page-level JavaScript flags were replaced by a unified structure
+  and three references were left behind; one of them sat in an error handler, so it threw only when
+  a request failed — and the message that handler existed to print was the one thing that would
+  have pointed at it. It shipped in two release images. Reproduced here from the two real revisions:
+  the command names all four, at all six sites, with `in jq` and `in uploadFW` beside them.
+
+### Fixed
+* **A page is two languages, and only one of them was being lexed.** `.html` got `<!-- -->`
+  handling and nothing else, so every `//` and `/* */` inside `<script>` was indexed **as code**.
+  On one real page that was **371 comment lines presented as source** — commented-out code
+  contributing symbols, and names mentioned only in prose coming back as live references.
+  Now the JavaScript rules switch on inside `<script>` and the markup rules switch off.
+
+* **JavaScript regex literals are no longer read as quotes or comments.** `/[&<>"']/g` holds a `"`
+  and a `'` that are ordinary characters; lexed as quotes they pair with the next real quote far
+  below and everything between stops being code. This was not optional: fixing the comments without
+  it took the code the indexer could see on one page from 96.9% of the file to **48.7%**. A slash
+  opens a regex unless the previous significant character ended a value.
+
+* **Module-scope JavaScript variables are indexed** (kind `js_var`). Only `js_function` was, so
+  `var enabled = 0;` was invisible — and invisible means its deletion was invisible too, which is
+  why `dangling-refs` could not have worked without this. Locals stay out: one page had 52
+  module-scope declarations against 230 locals, and nobody searches for a local.
+
+* **The reference scan keeps looking for a name after its definition is gone.** A reference was
+  recorded only when it matched a known name, so removing a definition erased every call site of
+  it from the index — the evidence vanished at exactly the moment it became interesting, and
+  "0 references" read as "nothing uses it".
+
 ## 2026-09-09
 
 ### Added
