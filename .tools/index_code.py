@@ -443,13 +443,58 @@ def carry_persistent_tables(old_db, con) -> str:
     return out
 
 
-def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_digest: str) -> bool:
+def orphan_file_count(con: sqlite3.Connection) -> int:
+    """How many `files` rows have no row in ANY scanned table.
+
+    A stable number is normal - a header of pure #defines, a XAML file, a C# DTO of auto-properties
+    all legitimately yield nothing. A number that has GONE UP since the last build means rows were
+    lost without the file changing, which is the damaged state described on index_is_fresh below.
+    """
+    usable = []
+    for table in SCANNED_TABLES:
+        try:
+            cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+        except sqlite3.Error:
+            continue
+        if "file" in cols:
+            usable.append(table)
+    if not usable:
+        return 0
+    union = " UNION ".join(f"SELECT file FROM {t}" for t in usable)
     try:
-        return (
+        return con.execute(f"SELECT COUNT(*) FROM files WHERE path NOT IN ({union})").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+
+
+def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_digest: str) -> bool:
+    """Can this build be skipped entirely?
+
+    THE DIGESTS ONLY DESCRIBE THE SOURCE. They say nothing about whether the INDEX still holds what
+    the last build put there, so a database that has lost rows without the tree changing is
+    "fresh" for ever: the build short-circuits here, plan_incremental is never reached, and the
+    per-file recovery there never gets a chance to run. Only --force escapes, and nobody runs
+    --force because nothing looks wrong.
+
+    Measured 100926 on a real index: two sources present on disk, in git and in the .csproj had no
+    rows at all, and every plain run reported "cached" and exited 0. Fixing plan_incremental alone
+    did NOT help them, precisely because this gate returns first - the accompanying test only passed
+    because copying the fixture changed the digest and so bypassed this.
+
+    So freshness now also requires the orphan count to be unchanged. A project with a stable set of
+    genuinely empty files stays cached; one that has just lost rows does not.
+    """
+    try:
+        if not (
             meta_value(con, "index_schema") == INDEX_SCHEMA_VERSION
             and meta_value(con, "source_digest") == source_digest
             and meta_value(con, "annotation_digest") == annotation_digest
-        )
+        ):
+            return False
+        # Absent on databases built before this check existed: treat as "unknown", rebuild once,
+        # and it is recorded from then on. Self-healing, no schema version bump.
+        recorded = meta_value(con, "orphan_files")
+        return recorded is not None and recorded == str(orphan_file_count(con))
     except sqlite3.Error:
         return False
 
@@ -3375,6 +3420,11 @@ def main() -> int:
     con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("index_schema", INDEX_SCHEMA_VERSION))
     con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("source_digest", source_digest))
     con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("annotation_digest", annotation_digest))
+    # Recorded AFTER the scan, so it describes what this build actually left behind. index_is_fresh
+    # compares it on the next run: an orphan count that has grown means rows were lost without the
+    # tree changing, and the build must not report "cached".      -- 100926
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                ("orphan_files", str(orphan_file_count(con))))
     con.commit()
 
     stats = current_stats(con)

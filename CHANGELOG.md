@@ -21,10 +21,19 @@ getting; the commit messages carry the reasoning and the measurements behind the
   Reproduced deliberately by deleting one file's `symbols` rows while keeping its `files` row - the
   next normal run did not restore them.
 
-  The plan now also re-scans any file that has a `files` row but no row in **any** scanned table.
-  Measured cost on that index: 2 files of 423 (0.5%) genuinely contain nothing indexable and are
-  re-scanned every run. No schema change, so existing databases self-heal on the next build rather
-  than needing a full rebuild.
+  The fix has **two** halves, and the first alone was not enough. `plan_incremental` now re-scans any
+  file that has a `files` row but no row in **any** scanned table — but `index_is_fresh` returns
+  before that is ever reached, so on a real repository, where nothing had been touched, the damaged
+  files stayed lost and every run printed `"cached": true` and exited 0. The accompanying test passed
+  only because copying the fixture changed the source digest and so skipped that gate. Freshness
+  therefore now also requires the count of files-with-no-rows to be **unchanged** since the last
+  build: a project with a stable set of genuinely empty files stays cached, one that has just lost
+  rows does not.
+
+  Verified on the index where it was found: tree untouched, `"cached": false`, the file's symbols
+  back, and the very next run `"cached": true` again — the no-op path is intact. Measured cost:
+  2 files of 423 (0.5%) genuinely contain nothing indexable. No schema change; existing databases
+  record the new counter on their next build and self-heal.
 
 ### Documented
 * **`annotation` and `concept` match one SUBSTRING, not a set of keywords** (README). Both are a

@@ -1861,6 +1861,30 @@ def main():
                 check("a file whose scanned rows vanished is re-indexed without --force",
                       after == before, f"{victim}: before={before} after={after}")
 
+                # AND AGAIN WITH THE TREE COMPLETELY UNCHANGED. The first version of this fix lived
+                # only in plan_incremental, and index_is_fresh returns before that is ever reached -
+                # so on a real repository, where nothing had been touched, the damaged file stayed
+                # lost and every run printed "cached" and exited 0. This case is the one that
+                # caught it: no copy, no touch, nothing to change a digest.
+                con = _sq.connect(str(dbs[0]))
+                for t in ("symbols", "symbol_comments", "architecture_comments",
+                          "refs", "constants", "api_markers"):
+                    try:
+                        con.execute(f"DELETE FROM {t} WHERE file = ?", (victim,))
+                    except _sq.Error:
+                        pass
+                con.commit()
+                con.close()
+                rc, out, _ = run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+                check("the build does not report 'cached' when rows were lost",
+                      '"cached": true' not in out.lower().replace(" ", ""), out[:200])
+                con = _sq.connect(str(dbs[0]))
+                after2 = con.execute("SELECT COUNT(*) FROM symbols WHERE file = ?",
+                                     (victim,)).fetchone()[0]
+                con.close()
+                check("rows lost on an UNCHANGED tree are still recovered without --force",
+                      after2 == before, f"{victim}: before={before} after={after2}")
+
     # THE EXIT CODE MUST SEE EVERY CHECK. There is an `if FAILED: return 1` partway up this
     # function, and roughly 350 lines of tests run AFTER it - the html lexer, the js vars,
     # dangling-refs, and everything above. A failure in any of those printed FAIL and then fell
