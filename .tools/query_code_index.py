@@ -122,6 +122,25 @@ def selected_branch_dbs(branches: str, current_db: Path = DEFAULT_DB) -> list[tu
     return [(branch.strip(), branch_db_path(branch.strip())) for branch in branches.split(",") if branch.strip()]
 
 
+# Which language a path belongs to. Only the grouping matters, not the name of the group: two files
+# are comparable when a name written in one could actually refer to a definition in the other.
+_LANG_FAMILIES = (
+    ("js", {".js", ".html", ".htm", ".mjs", ".jsx", ".ts", ".tsx"}),
+    ("c", {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".ino"}),
+    ("py", {".py"}),
+    ("sh", {".sh", ".bash"}),
+)
+
+
+def _lang_family(path: str) -> str:
+    dot = path.rfind(".")
+    ext = path[dot:].lower() if dot >= 0 else ""
+    for name, exts in _LANG_FAMILIES:
+        if ext in exts:
+            return name
+    return ext or "?"
+
+
 def rows_to_dicts(cursor: sqlite3.Cursor) -> list[dict]:
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, row)) for row in cursor.fetchall()]
@@ -487,6 +506,10 @@ def main() -> int:
                             "references -- a refactor that removed a definition and left the call "
                             "sites behind")
     p.add_argument("--kind", default="", help="restrict to one kind (js_var, js_function, function...)")
+    p.add_argument("--min-len", type=int, default=4,
+                   help="ignore names shorter than this (default 4). A short identifier is reused "
+                        "as a local in unrelated code far more often than it is left dangling, so "
+                        "below this length the finding is almost always a collision")
     p.add_argument("--limit", type=int, default=40)
 
     p = sub.add_parser("guard",
@@ -619,7 +642,7 @@ def main() -> int:
         branch = con.execute("SELECT value FROM meta WHERE key='branch'").fetchone()
         branch = branch[0] if branch else ""
         sql = ("SELECT b.name AS name, group_concat(DISTINCT b.kind) AS kinds,"
-               "       max(b.deleted_at) AS deleted_at,"
+               "       max(b.deleted_at) AS deleted_at, min(b.file) AS def_file,"
                "       count(DISTINCT r.file || ':' || r.line) AS sites"
                "  FROM branch_symbols b JOIN refs r ON r.symbol = b.name"
                " WHERE b.status = 'deleted' AND b.branch = ?"
@@ -627,18 +650,33 @@ def main() -> int:
                "                    WHERE a.name = b.name AND a.branch = b.branch"
                "                      AND a.status <> 'deleted')"
                "   AND NOT EXISTS (SELECT 1 FROM symbols c WHERE c.name = b.name)"
-               "   AND NOT EXISTS (SELECT 1 FROM constants k WHERE k.name = b.name)")
-        params = [branch]
+               "   AND NOT EXISTS (SELECT 1 FROM constants k WHERE k.name = b.name)"
+               "   AND length(b.name) >= ?")
+        params = [branch, args.min_len]
         if args.kind:
             sql += " AND b.kind = ?"
             params.append(args.kind)
         sql += " GROUP BY b.name ORDER BY sites DESC, b.name LIMIT ?"
         params.append(args.limit)
         rows = rows_to_dicts(con.execute(sql, params))
+        # A NAME IS ONLY THE SAME NAME WITHIN ONE LANGUAGE. Matching across the whole repository
+        # made the first real run 2 findings and 2 false positives: a `dbg` deleted as a JS
+        # function was "still referenced" by an HTML element id and by a local in a Python test,
+        # and `dmp` by a variable in a C server. Nothing connects those to the definition that
+        # went. Short names make this certain rather than unlikely, and a check whose findings are
+        # all false is one people learn to skip.
+        kept = []
         for row in rows:
-            row["references"] = rows_to_dicts(con.execute(
-                "SELECT file, line, in_symbol FROM refs WHERE symbol = ?"
-                " ORDER BY file, line LIMIT 12", (row["name"],)))
+            home = _lang_family(row["def_file"] or "")
+            refs = [r for r in rows_to_dicts(con.execute(
+                "SELECT file, line, in_symbol FROM refs WHERE symbol = ? ORDER BY file, line",
+                (row["name"],))) if _lang_family(r["file"]) == home]
+            if not refs:
+                continue
+            row["sites"] = len({(r["file"], r["line"]) for r in refs})
+            row["references"] = refs[:12]
+            kept.append(row)
+        rows = kept
         if args.json:
             print(json.dumps(rows, indent=1))
             return 0
@@ -646,6 +684,9 @@ def main() -> int:
             print("no dangling references: every name still referenced is still defined")
             return 0
         print("REFERENCED BUT NO LONGER DEFINED -- a removed definition with its call sites left behind:")
+        if args.min_len > 1:
+            print("  (names shorter than %d characters are not considered; --min-len to change)"
+                  % args.min_len)
         for row in rows:
             print("  %-28s %-24s deleted %s   %d site(s)"
                   % (row["name"], row["kinds"] or "", (row["deleted_at"] or "")[:10], row["sites"]))

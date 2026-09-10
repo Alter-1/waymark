@@ -14,6 +14,14 @@ getting; the commit messages carry the reasoning and the measurements behind the
   with the enclosing function of every site, because "who still calls this" is the question you
   actually have.
 
+  Two filters keep it honest, and both were added because the first run on a real repository
+  produced two findings and both were wrong. A name is only the same name **within one language**:
+  a `dbg` deleted as a JS function was "still referenced" by an HTML element id and by a local in a
+  Python test. And names shorter than four characters are ignored by default (`--min-len`), because
+  a short identifier is reused as a local in unrelated code far more often than it is left
+  dangling — the survivor of the first filter was `char dmp` in a C file, a local variable that
+  happened to share its name with a symbol mis-extracted from a generated blob.
+
   Written after a real one. Four page-level JavaScript flags were replaced by a unified structure
   and three references were left behind; one of them sat in an error handler, so it threw only when
   a request failed — and the message that handler existed to print was the one thing that would
