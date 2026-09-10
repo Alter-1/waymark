@@ -130,3 +130,47 @@ Tokens are now rejected if they exist in `sha^`.
 The honest cost is coverage: it returns *nothing testable* for many commits rather than guessing.
 That is the correct failure mode. It is **triage, not a verdict** — `partial` is the interesting
 column and always needs reading.
+
+## Two ways a presence check answers the wrong question
+
+Both were measured on a real four-line tree on 09-10/09/2026, in the same week, in opposite
+directions. They are the reason `verify_port.py` refuses to guess, and the reason a register row is
+worth little without recorded evidence behind it.
+
+### A marker says whether THAT CODE is present. It never says whether THE PROBLEM is solved.
+
+**Presence, and the port was two thirds missing.** `PickerSwatch` resolved 4 times on the target
+against 14 on the source. The check said "ported"; 531 lines of the rework were absent. A
+partially-applied port passes a marker check by construction.
+
+**Absence, and a better fix was already there.** The source's `forbiddenChars` block resolved 2 / 0 /
+0 across three lines, so it was registered as a gap and ported. The target already owned that
+decision in **one** place, under a different name, covering strictly more cases - and the source's
+block had been *superseded* by that same wrapper nine months earlier and simply never removed. The
+port re-introduced dead code as a second owner and had to be reverted.
+
+So the triage question is never *"does the target have this code?"* but **"who owns this problem on
+the target?"** - searched by symptom, in the target's own vocabulary. The register is part of that
+answer: an existing item pointed straight at the owner and was read past.
+
+### A grep of a checkout reads the CHECKED-OUT branch, not the branch you name
+
+Every content tool here reads the **working tree**. Name a branch in the question and a checkout
+sitting on another branch will answer for that other branch, under your label, with nothing on
+screen suggesting it.
+
+Measured: a 2.0 checkout was sitting on its own port branch. Three claims of the form "2.0 already
+has X" were made by `grep` and all three were false about the branch named - `ToolBoxPolicy` 0 vs 2,
+`QuoteFnForIPSDK` 0 vs 4, `_PendingNumber` 0 vs 6. The same mistake reached index selection: the
+per-branch database is named after `HEAD`, so an audit *of* `Veo-2.0` loaded
+`code_index.port-from-master-DE2-to-Veo-2.0.sqlite` and reported its numbers as that branch's.
+
+Two rules follow:
+
+* When a statement is about a **ref**, read the ref - `git show <ref>:<path>`,
+  `git merge-base --is-ancestor`. Never grep a working tree and name a branch in the answer.
+  On MSYS or git-bash, set `MSYS_NO_PATHCONV=1` first, or `<ref>:<path>` is silently rewritten and
+  returns nothing at all.
+* A tool that names a branch should **refuse** to run when the checkout is on a different one,
+  rather than relabel its output. Switching branches under the user is worse: the tree may carry
+  uncommitted work.

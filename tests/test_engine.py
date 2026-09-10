@@ -13,6 +13,7 @@ Standard library only, no test framework, exit code 1 on failure.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1816,6 +1817,49 @@ def main():
         rc, out, _ = query("dangling-refs", cwd=proj)
         check("a definition that only gained its class prefix is not 'deleted'",
               "ratio" not in out, out[:300])
+
+    # A `files` ROW THAT OUTLIVED ITS SCANNED ROWS MUST NOT MAKE THE FILE INVISIBLE.
+    #
+    # The incremental plan compared size+mtime against the `files` table and nothing else, so a file
+    # whose rows had gone - an interrupted run, a crash, a lock - still looked "unchanged" and was
+    # never rescanned. Silent and permanent: no query reported it, and only --force recovered it.
+    # Found 100926 on a real index, where two IP_SDK_Wrapper files present on disk, in git and in
+    # the .csproj had silently dropped out.
+    with tempfile.TemporaryDirectory() as td:
+        import sqlite3 as _sq
+        proj = Path(td) / "p"
+        shutil.copytree(ROOT, proj, ignore=shutil.ignore_patterns(
+            ".git", "*.sqlite", "*.json.bak*", "__pycache__"))
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        dbs = sorted(Path(proj / ".tools").glob("code_index.*.sqlite"))
+        check("incremental fixture built an index", bool(dbs), str(dbs))
+        if dbs:
+            con = _sq.connect(str(dbs[0]))
+            row = con.execute("SELECT file, COUNT(*) FROM symbols GROUP BY file "
+                              "ORDER BY COUNT(*) DESC LIMIT 1").fetchone()
+            check("fixture has a file with symbols to strip", bool(row), str(row))
+            if row:
+                victim, before = row
+                # Strip ONLY the scanned rows; leave the files row, so size+mtime still match.
+                for t in ("symbols", "symbol_comments", "architecture_comments",
+                          "refs", "constants", "api_markers"):
+                    try:
+                        con.execute(f"DELETE FROM {t} WHERE file = ?", (victim,))
+                    except _sq.Error:
+                        pass
+                con.commit()
+                gone = con.execute("SELECT COUNT(*) FROM symbols WHERE file = ?",
+                                   (victim,)).fetchone()[0]
+                check("negative control: the rows really were removed", gone == 0, f"{gone}")
+                con.close()
+                # A PLAIN incremental run - not --force - must put them back.
+                run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+                con = _sq.connect(str(dbs[0]))
+                after = con.execute("SELECT COUNT(*) FROM symbols WHERE file = ?",
+                                    (victim,)).fetchone()[0]
+                con.close()
+                check("a file whose scanned rows vanished is re-indexed without --force",
+                      after == before, f"{victim}: before={before} after={after}")
 
     # THE EXIT CODE MUST SEE EVERY CHECK. There is an `if FAILED: return 1` partway up this
     # function, and roughly 350 lines of tests run AFTER it - the html lexer, the js vars,

@@ -7,6 +7,46 @@ getting; the commit messages carry the reasoning and the measurements behind the
 
 ## 2026-09-10
 
+### Fixed
+* **An incremental build could lose a file for ever, silently.** `plan_incremental` decided what to
+  re-scan by comparing size and mtime against the `files` table and nothing else. If a file's row
+  there outlived its scanned rows - an interrupted run, a crash, a lock, a full disk - size and mtime
+  still matched, so it was never re-scanned; and because `files` said it was current, nothing
+  reported it missing. The file simply stopped existing as far as every query, note and cross-branch
+  comparison was concerned, and only `--force` recovered it, which nobody runs because nothing looks
+  wrong.
+
+  Found on a real index: two `IP_SDK_Wrapper` sources present on disk, in git and in the `.csproj`,
+  indexed an hour earlier in a different database, absent from every incremental run since.
+  Reproduced deliberately by deleting one file's `symbols` rows while keeping its `files` row - the
+  next normal run did not restore them.
+
+  The plan now also re-scans any file that has a `files` row but no row in **any** scanned table.
+  Measured cost on that index: 2 files of 423 (0.5%) genuinely contain nothing indexable and are
+  re-scanned every run. No schema change, so existing databases self-heal on the next build rather
+  than needing a full rebuild.
+
+### Documented
+* **`annotation` and `concept` match one SUBSTRING, not a set of keywords** (README). Both are a
+  single `LIKE %term%`, so a query written as loose keywords returns `No matches` for an entry that
+  is certainly present - output indistinguishable from the entry not existing. Observed on an entry
+  reported missing minutes after it was written, because the query said "branch audit" and the name
+  says `branch_audit`. **`No matches` is not evidence of absence**, and that matters most in exactly
+  the case the KB exists for: checking whether something was already recorded before re-deriving it.
+
+* **Two ways a presence check answers the wrong question** (docs/CROSS-BRANCH-REGISTER.md), both
+  measured in the same week in opposite directions: a marker present while two thirds of the port was
+  missing, and a marker absent while a better fix already existed under another name and the source's
+  own copy had been superseded nine months earlier. Plus the one that produced three false claims in
+  a single session - **a grep of a checkout reads the checked-out branch, not the branch you name**,
+  which also reached index selection, since the per-branch database is named after `HEAD`.
+
+### Known
+* `tests/test_engine.py` case *"twelve concurrent notes all survive"* is **flaky**: it failed once in
+  a run where nothing related had changed, and passed on immediate re-runs and on a clean baseline.
+  Not investigated; recorded so the next person does not treat one red run as a regression.
+
+
 ### Added
 * **`kb_stale.py`** — is the knowledge base still **true of the code**? `selftest` has ten checks
   and all ten are about a KB's internal consistency; every one passes on a KB that is perfectly

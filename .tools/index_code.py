@@ -497,6 +497,32 @@ def stored_file_state(con: sqlite3.Connection) -> dict:
         return {}
 
 
+def files_missing_scanned_rows(con: sqlite3.Connection, on_disk: set) -> set:
+    """Paths recorded in `files` that have no row in ANY scanned table, and still exist on disk.
+
+    Only tables that actually carry a `file` column are consulted, so a schema that grows a scanned
+    table keyed differently cannot make this raise. A table that is missing entirely is skipped for
+    the same reason - this runs on every incremental build and must never be the thing that breaks
+    one.
+    """
+    usable = []
+    for table in SCANNED_TABLES:
+        try:
+            cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+        except sqlite3.Error:
+            continue
+        if "file" in cols:
+            usable.append(table)
+    if not usable:
+        return set()
+    union = " UNION ".join(f"SELECT file FROM {t}" for t in usable)
+    try:
+        rows = con.execute(f"SELECT path FROM files WHERE path NOT IN ({union})")
+        return {r[0] for r in rows if r[0] in on_disk}
+    except sqlite3.Error:
+        return set()
+
+
 def plan_incremental(con: sqlite3.Connection, files: list) -> tuple | None:
     """(rescan, gone) for an incremental build, or None if this one has to be done in full.
 
@@ -522,6 +548,22 @@ def plan_incremental(con: sqlite3.Connection, files: list) -> tuple | None:
             continue
         current[rel(path)] = (st.st_size, st.st_mtime_ns)
     rescan = sorted(p for p, v in current.items() if stored.get(p) != v)
+    # A FILE ROW THAT OUTLIVED ITS SCANNED ROWS IS INVISIBLE FOR EVER.
+    #
+    # size+mtime still match, so the file is never rescanned; nothing counts it as missing, because
+    # `files` says it is up to date. The only way out was --force, which nobody runs because nothing
+    # reports a problem. Any interruption between forget_files() and the inserts leaves this state -
+    # Ctrl-C, a crash, a full disk, an antivirus lock - and it is silent and permanent.
+    #
+    # Found 100926 on a real index: IP_SDK_Wrapper/ASTM422AnalizerResult.cs and DWAnalizerResult.cs
+    # were present on disk, in git and in the .csproj, and had been indexed an hour earlier in
+    # another database, yet every incremental run left them out. --force recovered them. Reproduced
+    # deliberately by deleting a file's symbols rows while keeping its `files` row: the next normal
+    # run did NOT restore them.
+    #
+    # Cost of the check, measured on that index: 2 files of 423 (0.5%) genuinely have no rows in any
+    # scanned table, so they rescan every run. That is the entire price of never losing a file again.
+    rescan = sorted(set(rescan) | files_missing_scanned_rows(con, set(current)))
     gone = sorted(p for p in stored if p not in current)
     return rescan, gone
 
