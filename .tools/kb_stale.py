@@ -653,6 +653,21 @@ def main():
                                      % (rel, base, ln, path, n, b))
                     continue
                 c, n = usable[0]
+                # IS THE FILE WE MEASURED PLAUSIBLY THE ONE THE CITATION MEANS? `preferred` holds
+                # the copies sitting in the entry's own referent directory. With none, and with the
+                # basename absent from the entry's referents, the match is a GUESS -- and a wrong
+                # guess reads as a stale citation forever.
+                # Measured: an entry about ESP-IDF WiFi cites esp_wifi_types.h:294, whose only
+                # in-tree namesake is a 7-line stub under a vendored component's host tests. The
+                # real header is in the SDK, outside the repository and outside any index. Calling
+                # that "out of range" is answering a question nobody asked, and one permanent false
+                # positive means a non-zero exit forever, which stops the tool being a gate.
+                related = bool(preferred) or any(os.path.basename(r) == base for r in refs)
+                if not related:
+                    advisory.append(
+                        "%s -> %s:%d not range-checked: no copy of that name belongs to this entry"
+                        " (nearest in tree: %s, %d lines)" % (rel, base, ln, c, n))
+                    continue
                 problems["citation-range"].append(
                     "%s -> %s:%d (%s has %d lines%s)"
                     % (rel, base, ln, c, n,

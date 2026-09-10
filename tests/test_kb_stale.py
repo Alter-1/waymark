@@ -43,7 +43,9 @@ def scratch(td, source, entries, roots=("src",), ann="Docs/kb"):
     (proj / "kb.config.json").write_text(json.dumps(
         {"project": {"name": "t", "roots": list(roots)}, "annotations": ann}), encoding="utf-8")
     for name, text in source.items():
-        (proj / "src" / name).write_text(text, encoding="utf-8")
+        dest = proj / "src" / name
+        dest.parent.mkdir(parents=True, exist_ok=True)   # a source name may carry a subdirectory
+        dest.write_text(text, encoding="utf-8")
     for name, text in entries.items():
         dest = proj / ann / name
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -207,6 +209,42 @@ def main():
               "NO ENTRIES" in out and p.returncode != 0,
               "rc=%s\n%s" % (p.returncode, out[:400]))
 
+    # ------------------------------------ a basename that belongs to no referent is a GUESS
+    # A citation names a basename. When the only file of that name in the tree has nothing to do
+    # with the entry -- a vendored test stub, say, while the real header lives in an SDK outside the
+    # repository -- measuring the citation against it answers a question nobody asked, and one
+    # permanent false positive means a non-zero exit forever.
+    with tempfile.TemporaryDirectory() as td:
+        # The stub must live somewhere the entry has nothing to do with -- in a FLAT project every
+        # file shares the referent's directory, so it always looks related and the case proves
+        # nothing. The real shape: a vendored component's host tests, while the entry is about
+        # firmware elsewhere.
+        proj = scratch(td,
+                       {"fw/real.cpp": CPP, "vendor/tests/host/stub.h": "// one line\n"},
+                       {"e.md": entry("alive", "src/fw/real.cpp",
+                                      "the SDK header stub.h:900 explains the flag\n")})
+        rc, out = stale(proj)
+        head = out.split("check: resolves-only-elsewhere")[0]
+        cr = head.split("check: citation-range")[1] if "check: citation-range" in head else ""
+        check("an unrelated basename is not reported as out of range",
+              "PROBLEM" not in cr.split("check:")[0], out[:500])
+        check("...and the run can still be a gate", rc == 0, "rc=%s\n%s" % (rc, out[:400]))
+
+    # the control: when the entry DOES name the file, a bad line is still caught
+    with tempfile.TemporaryDirectory() as td:
+        proj2 = scratch(td, {"real.cpp": CPP},
+                        {"e.md": entry("alive", "src/real.cpp", "see src/real.cpp:900\n")})
+        rc2, out2 = stale(proj2)
+        check("a citation into the entry's OWN file is still range-checked",
+              "900" in out2 and rc2 != 0, "rc=%s\n%s" % (rc2, out2[:400]))
+
+    # THE EXIT CODE MUST SEE EVERY CHECK. The guard partway up main() stops a broken tool running
+    # another hundred cases against itself, but everything below it was invisible to the exit
+    # status: two checks printed FAIL, the run printed "all passed" and exited 0. Same defect, and
+    # same fix, as test_engine.py -- found here by the cases added directly beneath it.
+    if FAILED:
+        print("\n%d FAILED: %s" % (len(FAILED), ", ".join(FAILED)))
+        return 1
     print("all passed")
     return 0
 
