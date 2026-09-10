@@ -63,6 +63,24 @@ elsewhere.** Fixes land on whichever branch the bug was hit on; the same bug the
 and re-fixed from scratch somewhere else. Audit by reading the **final code** on each branch, not by
 `git cherry` — a fix can be present in a different shape. *Fixes propagate; features do not.*
 
+**Assert that every scripted edit matched.** A `replace` that finds nothing is not an error in
+Python, Perl or sed — the script exits 0, the commit looks clean, and the change is simply absent.
+Assert the anchor before writing, and say what it is:
+
+```python
+assert s.count(old) == 1, "the option loop in the select helper"
+```
+
+Three ways this arrives, all seen in one project inside two days: the anchor missed on
+**indentation** (assumed sixteen spaces, the file had fourteen); one `replace` in a pair matched
+while its neighbour did not, so the two halves of a change disagreed and the build broke somewhere
+else entirely; and an assert placed **after** an earlier write in the same script left one file
+updated and the next not — the commit went out with the code but not its documentation.
+
+Assert a property of the RESULT too, not only the anchor. An edit can match its anchor and still
+produce something you did not intend, and the result assertion is what catches the difference
+between "it ran" and "it did what I meant".
+
 ### If you generate source, do not send it through a shell
 
 Writing file content inside an *unquoted* shell heredoc silently consumes one level of escaping, and
@@ -95,6 +113,16 @@ manual sweep if it is cheap, but fix the transport. *No workaround for code unde
 
 ## 3. Proving it
 
+**A counter is not a delivery receipt.** Prove the thing arrived where it was supposed to arrive —
+a distinctive marker in the payload, observed at the destination — not that a counter moved. A
+counter can be correct, can be sampled at the wrong moment, or can be measuring something adjacent,
+and all three look identical in a pass/fail table.
+
+This cost two wrong diagnoses in one day on one project, both recorded as findings before an
+end-to-end marker disproved them in a single run. The counters were not lying: they reported
+per-second rates and were being sampled before and after the burst rather than during it. The
+subsystem had been correct the whole time.
+
 **A test that passes for the wrong reason is worse than one that fails.** Before believing a new
 test, break the fix and watch the test fail. Twice in one day here, a check "passed" while reading
 the wrong file — once accusing the engine of a defect it did not have, once confirming a claim that
@@ -102,6 +130,15 @@ was false.
 
 **Name the thing you mean.** `sorted(glob("*.db"))[0]` picks whatever sorts first, which is not what
 you meant and will differ on someone else's machine. Globs are for sets, not for "the one I want".
+
+**An instrument must not destroy what it measures.** Two shapes of the same mistake:
+
+* `pkill -f <pattern>` and `pgrep -f <pattern>` match **the invoking shell's own command line**, so
+  the command kills itself and whatever it was meant to do never happens. Bracket the first
+  character so the literal pattern is no longer present in the command being run — `pkill -f
+  "[m]y_job"` — or kill by a PID captured when the job was launched.
+* `| head` on a **running** measurement closes the pipe, and the writer dies of SIGPIPE. What you
+  read is not a sample of the run; it is the run, truncated to the length of your window.
 
 **Never cap a completeness search.** `| head` on "who calls this?" emits no warning and looks exactly
 like a finished list. A self-imposed cap once turned into a confidently wrong root cause: fourteen
@@ -361,6 +398,8 @@ of it could ever reach them.
 
 Verify before you fix. Explain before you edit. Make absence loud. Prove a search can succeed
 before believing it failed, and check a result you did get against a value you chose. Assert state
-in the same breath as the action that depends on it. Keep the evidence, especially of failure.
+in the same breath as the action that depends on it — and assert that your edit matched, because a
+replace that finds nothing exits 0. Never let the instrument destroy what it measures. Prove
+delivery at the destination, not that a counter moved. Keep the evidence, especially of failure.
 Record the symptom, the dead ends and the uncertainty. And put the knowledge where the next person
 will actually look — which is not your memory, and not the commit message.
