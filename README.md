@@ -633,6 +633,42 @@ placed where somebody is about to act on the headline alone. `selftest` lists th
 reads. Only the opening of the brief is examined; a brief that narrates a history it has moved past
 ("this was believed FIXED in build 9 and is not") is left alone.
 
+## Skills: letting an agent run a procedure instead of re-deriving it
+
+A procedure that lives only as prose gets re-derived. Opt an entry in, and the build projects it
+into a skill an agent can load:
+
+```yaml
+skill: cross-branch-port
+skill_when: "port this to the other branches, sync a fix across the release lines"
+```
+
+…plus a `## procedure` section in the body, **which is the only section copied**. `index_code.py`
+regenerates `.claude/skills/` on every run, so there is no restore step and no second copy to
+drift; `gen_skills.py --check` reports without writing and exits non-zero, so it can gate a build.
+`skills_dir` in `kb.config.json` moves the output.
+
+**A skill is a projection, never a source.** It is also the narrowest place knowledge can sit: it
+means nothing to a human, nothing to another tool, and — if your repository publishes through a
+filtered mirror — it may not travel at all, while `.tools/` and the KB do. So the finding stays in
+the entry, the doing stays in a script, and the skill is a thin adapter over both.
+
+An entry with no `## procedure` section is **refused**, not flattened. Most of a good entry is
+evidence, measurements and dead hypotheses — its whole value, and exactly what must not be loaded
+into a skill.
+
+## Tools beyond the query
+
+Everything above is `query_code_index.py`. These are separate, and each answers one question:
+
+| | |
+|---|---|
+| `gen_skills.py` | project opted-in procedures into agent skills (above) |
+| `kb_stale.py` | is the KB still true of the code — see *Whether the knowledge base is still true* |
+| `verify_port.py` | is this commit's substance on that branch? Scores the tokens the commit *introduced*, so it answers by content when patch identity no longer matches. Triage, not a verdict |
+| `xstatus.py` | a cross-branch register: **why** a fix is absent from a branch — never ported, deliberately rejected, not applicable — which git has nowhere to record. See [`Docs/CROSS-BRANCH-REGISTER.md`](Docs/CROSS-BRANCH-REGISTER.md) |
+| `css_factor.py` | which repeated CSS declarations can be folded into a selector list, **and whether that is safe**. Refuses any fold the cascade would change, and reports the refusals — usually the more interesting output |
+
 ## Handing work to the next context
 
 Waymark keeps durable facts queryable; a handover records current working state. Use both when a
