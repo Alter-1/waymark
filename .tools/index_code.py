@@ -3365,6 +3365,18 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         if len(annotation_status_problems) > 20:
             print(f"  ... and {len(annotation_status_problems)-20} more", file=sys.stderr)
+
+    # PROJECT THE OPTED-IN PROCEDURES INTO AGENT SKILLS. A skill is GENERATED, never authored: the
+    # KB is the source, `.claude/skills/` is gitignored, and a fresh clone gets its skills from the
+    # first index build -- so there is no "restore" step and no copy that can drift. Hooked here
+    # because rebuilding the index after a KB edit is already mandatory; anything needing its own
+    # command would be the command nobody runs.
+    # Never fatal: a broken projection must not cost you the index.
+    try:
+        import gen_skills
+        gen_skills.main_quiet()
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"\nskills: not generated ({exc})", file=sys.stderr)
     return 0
 
 

@@ -5,6 +5,30 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-10 (later)
+
+### Added
+* **`gen_skills.py` — the knowledge base projects its procedures into agent skills**, and
+  `index_code.py` regenerates them on every build. A skill is GENERATED, never authored: the KB is
+  the source, the skill directory is disposable, and a fresh clone gets its skills from the first
+  index build. There is no restore step and no second copy to drift.
+
+  This is a deliberate answer to *reach*. A skill is the narrowest store there is — it means
+  nothing to a human, nothing to another tool, and in the project this was built for it does not
+  even reach the off-site mirror, whose path allow-list carries `.tools/` but not `.claude/`. So a
+  skill must never be the only copy of anything: the finding stays in the KB, the doing stays in a
+  script, and the skill is a thin adapter over both.
+
+  Opting in takes three things, and the third is the one that matters: `skill:` (a name),
+  `skill_when:` (the trigger, in your words — the only text an agent matches on), and a
+  `## procedure` section, **which is the only section copied**. An entry without one is refused
+  rather than flattened. Most of a good KB entry is evidence, measurements and dead hypotheses —
+  its whole value, and exactly what must not be loaded into a skill. `--check` reports without
+  writing and exits non-zero, so it can gate a build.
+
+  `skills_dir` in `kb.config.json` moves the output; the default is `.claude/skills`. The directory
+  an agent reads is that agent's convention, not the knowledge base's.
+
 ## 2026-09-10
 
 ### Added
