@@ -736,6 +736,21 @@ def main():
         if a.strict:
             total += len(elsewhere)
 
+    if advisory and not a.quiet:
+        # COLLECTED IN THREE PLACES AND PRINTED IN NONE -- so every advisory finding vanished, and
+        # the entry that produced it looked clean. That is the failure this tool exists to catch,
+        # for the third time in its own code: a check whose result nobody can see is not a check.
+        # These are DELIBERATELY not failures -- a citation sitting in a comment that merely names a
+        # function, or a basename belonging to no referent, is something to glance at, not to fix --
+        # but "not a failure" was never meant to be "not shown".
+        print("\n  check: advisory")
+        print("  result: FYI")
+        print("  detail: %d citation(s) worth a glance, counted as nothing" % len(advisory))
+        for x in advisory[:8]:
+            print("      %s" % x)
+        if len(advisory) > 8:
+            print("      ... and %d more" % (len(advisory) - 8))
+
     if unresolved and not a.quiet:
         print("\n  check: unresolved-elsewhere")
         print("  result: REVIEW")
