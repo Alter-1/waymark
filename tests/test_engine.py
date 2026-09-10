@@ -1728,6 +1728,104 @@ def main():
         check("dangling-refs names the removed definition", "doomed" in out, out[:300])
         check("dangling-refs names who still calls it", "user" in out, out[:300])
 
+    # ---------------------------------------------------------------------------------------
+    # A DEFINITION WHOSE PARAMETER LIST WRAPS. sample/core/store.cpp carries one on purpose --
+    # Store::copy_range, whose ')' is on the next line. Before this was handled, such a function
+    # got no symbol row at all: no notes, no refs, no graph, and any KB entry naming it read as
+    # stale. On one 3000-file C++ tree that was 575 invisible functions.
+    rc, out, _ = query("--json", "symbol", "copy_range")
+    doc = json.loads(out) if rc == 0 and out.strip().startswith("{") else {}
+    got = doc.get("rows", [])
+    check("a wrapped parameter list is still a definition", len(got) == 1,
+          f"got {[x.get('name') for x in got]}")
+    if got:
+        check("it is recorded under its qualified name", got[0]["name"] == "Store::copy_range",
+              got[0]["name"])
+        # THE LINE MUST BE WHERE THE DEFINITION STARTS, not where its arguments finish. Any KB
+        # entry or comment already citing it points at the first line, and a fix that moved the
+        # symbol to the closing line would silently invalidate every one of them.
+        src = (ROOT / "sample" / "core" / "store.cpp").read_text(encoding="utf-8").split("\n")
+        first = src[got[0]["line"] - 1]
+        check("it is anchored on the line the definition opens on",
+              "copy_range" in first and "bool" in first, f"line {got[0]['line']}: {first.strip()}")
+
+    # NEGATIVE CONTROLS. A wrapped CALL and a wrapped PROTOTYPE look almost exactly like a wrapped
+    # definition; if either were indexed the count above would still pass while the index filled
+    # with things that are not definitions.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        (proj / "src").mkdir(parents=True)
+        (proj / "Docs").mkdir()
+        (proj / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            shutil.copy(TOOLS / f, proj / ".tools" / f)
+        (proj / "kb.config.json").write_text(json.dumps(
+            {"project": {"name": "t", "roots": ["src"]}, "annotations": ["Docs"]}), encoding="utf-8")
+        (proj / "src" / "a.cpp").write_text(
+            "void real_definition(int a,\n"
+            "                     int b) {\n"
+            "    other_call(a,\n"
+            "               b);\n"
+            "}\n"
+            "int prototype_only(int a,\n"
+            "                   int b);\n", encoding="utf-8")
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        # NOTE the assertion is on rows, not on the text: --json echoes the query string back in
+        # the envelope, so "name not in out" is true even when nothing was found.
+        def rows_for(nm):
+            rc_, out_, _ = query("--json", "symbol", nm, cwd=proj)
+            d = json.loads(out_) if rc_ == 0 and out_.strip().startswith("{") else {}
+            return d.get("rows", [])
+
+        check("wrapped definition indexed in a bare project", len(rows_for("real_definition")) == 1,
+              str([r.get("name") for r in rows_for("real_definition")]))
+        check("a wrapped CALL is not indexed as a definition", rows_for("other_call") == [],
+              str([r.get("name") for r in rows_for("other_call")]))
+        check("a wrapped PROTOTYPE is not indexed as a definition",
+              rows_for("prototype_only") == [],
+              str([r.get("name") for r in rows_for("prototype_only")]))
+
+    # ---------------------------------------------------------------------------------------
+    # dangling-refs MUST NOT CALL A QUALIFIED NAME DELETED. Moving an inline out of a header
+    # renames the symbol from `ratio` to `Thing::ratio` in one indexing run: the bare row goes
+    # deleted, the qualified row arrives, and every call site still writes the bare name. Without
+    # this the command reported a live function as removed - one finding, one false positive,
+    # which is the rate that teaches a reader to ignore it.
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td) / "proj"
+        (proj / "src").mkdir(parents=True)
+        (proj / "Docs").mkdir()
+        (proj / ".tools").mkdir()
+        for f in ("index_code.py", "query_code_index.py"):
+            shutil.copy(TOOLS / f, proj / ".tools" / f)
+        (proj / "kb.config.json").write_text(json.dumps(
+            {"project": {"name": "t", "roots": ["src"]}, "annotations": ["Docs"]}), encoding="utf-8")
+        (proj / "src" / "t.h").write_text(
+            "class Thing {\npublic:\n    inline double ratio() { return 1.0; }\n};\n",
+            encoding="utf-8")
+        (proj / "src" / "c.cpp").write_text(
+            '#include "t.h"\ndouble user(Thing* t) {\n    return t->ratio();\n}\n', encoding="utf-8")
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+
+        # the move: inline out of the header, definition into the .cpp, qualified
+        (proj / "src" / "t.h").write_text(
+            "class Thing {\npublic:\n    double ratio();\n};\n", encoding="utf-8")
+        (proj / "src" / "t.cpp").write_text(
+            '#include "t.h"\ndouble Thing::ratio() {\n    return 1.0;\n}\n', encoding="utf-8")
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        rc, out, _ = query("dangling-refs", cwd=proj)
+        check("a definition that only gained its class prefix is not 'deleted'",
+              "ratio" not in out, out[:300])
+
+    # THE EXIT CODE MUST SEE EVERY CHECK. There is an `if FAILED: return 1` partway up this
+    # function, and roughly 350 lines of tests run AFTER it - the html lexer, the js vars,
+    # dangling-refs, and everything above. A failure in any of those printed FAIL and then fell
+    # through to "all passed" and exit 0, which is the engine's own "silent success is the worst
+    # failure mode" rule turned on its tests. Observed while writing the wrapped-signature cases
+    # above: two of them printed "FAIL", the run printed "all passed", and the exit code was 0.
+    if FAILED:
+        print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
+        return 1
     print("all passed")
     return 0
 
