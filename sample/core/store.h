@@ -25,6 +25,12 @@ public:
     /* Flush whatever the WAL is holding. Called by the idle timer and by close(). */
     void flush_pending();
 
+    /* Copy a key range into another store. Its DEFINITION in store.cpp deliberately wraps its
+       parameter list over two lines, because that is the shape the indexer used to miss entirely -
+       see the fixture note there. */
+    bool copy_range(const std::string& first_key, const std::string& last_key,
+                    Store* into, bool overwrite_existing);
+
     size_t live_keys() const;
 
     /* Drop the in-memory index. The log on disk is untouched, so the next open() rebuilds it. */

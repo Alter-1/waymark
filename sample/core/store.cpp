@@ -55,6 +55,25 @@ bool Store::compact() {
     return true;
 }
 
+/* FIXTURE: a definition whose PARAMETER LIST WRAPS. The indexer matched a signature only when its
+   closing ')' sat on the definition line, so a function written like this got no symbol row at all -
+   no notes, no refs, no graph, and any KB entry naming it looked stale. Keep the wrap. */
+bool Store::copy_range(const std::string& first_key, const std::string& last_key,
+                       Store* into, bool overwrite_existing) {
+    if (into == NULL || first_key > last_key) {
+        return false;
+    }
+    std::map<std::string, uint64_t>::const_iterator it = index_.lower_bound(first_key);
+    for (; it != index_.end() && it->first <= last_key; ++it) {
+        if (!overwrite_existing && into->index_.find(it->first) != into->index_.end()) {
+            continue;
+        }
+        into->index_[it->first] = it->second;
+    }
+    into->dirty_ = true;
+    return true;
+}
+
 void Store::flush_pending() {
     dirty_ = false;
 }

@@ -1456,6 +1456,51 @@ C_NOT_A_FUNCTION = {"if", "for", "while", "switch", "return",
                     "else", "do", "sizeof", "catch", "__attribute__"}
 
 
+# A DEFINITION WHOSE PARAMETER LIST WRAPS -- type and name on one line, arguments continuing:
+#
+#     bool Store::copy_range(const std::string& first_key, const std::string& last_key,
+#                            Store* into, bool overwrite_existing) {
+#
+# C_FUNC_RE requires the closing ')' on the definition line, and C_SPLIT_NAME_RE above is for the
+# OPPOSITE shape -- name first, return type on the line before. Neither covers this one, which is
+# how a great deal of C++ is written once a signature outgrows a line.
+#
+# Such a function got NO SYMBOL ROW AT ALL. The effect is quiet and wide: it can carry no note, it
+# appears in no refs and no graph, and any KB entry naming it reads as stale. Measured on a
+# 3000-file C++ tree: 575 functions were invisible, 20949 -> 21524, with `files` and `constants`
+# unchanged. Found by a KB-vs-code checker reporting entries whose symbol "did not exist" against
+# an index NEWER than the sources -- the knowledge base was right and the index was short.
+C_WRAPPED_SIG_MAX_LINES = 8
+
+
+def join_wrapped_signature(lines: "list[str]", idx: int) -> str:
+    """lines[idx] opens a parameter list that does not close on it -> the joined signature.
+
+    Deliberately narrow, because a wrapped CALL looks almost identical:
+      * only reached when the single-line and split forms have both failed;
+      * the first line must open a paren it does not close, and hold no ';';
+      * any continuation containing ';' abandons the attempt -- that is a call or a prototype;
+      * the joined text must still satisfy C_FUNC_RE, which demands a return type in front of the
+        name, and a bare call has none.
+    """
+    first = lines[idx]
+    if "(" not in first or ";" in first:
+        return ""
+    depth = first.count("(") - first.count(")")
+    if depth <= 0:
+        return ""                       # closes on its own line; C_FUNC_RE already had its chance
+    parts = [first.rstrip()]
+    for j in range(idx + 1, min(idx + 1 + C_WRAPPED_SIG_MAX_LINES, len(lines))):
+        nxt = lines[j]
+        if ";" in nxt:
+            return ""
+        parts.append(nxt.strip())
+        depth += nxt.count("(") - nxt.count(")")
+        if depth <= 0:
+            return " ".join(parts)
+    return ""
+
+
 def c_function_name(line: str, prev_line: str = "") -> str:
     m = C_FUNC_RE.match(line)
     if m and m.group(1) not in C_NOT_A_FUNCTION:
@@ -1599,6 +1644,7 @@ def scan_definition_line(
     commented_out: int = 0,
     prev_line: str = "",
     guarded_by: str = "",
+    wrapped: str = "",
 ) -> None:
     stripped = line.strip()
     if not stripped:
@@ -1637,6 +1683,14 @@ def scan_definition_line(
             # it, so store both -- the reader wants "const ip4_addr_t * netif_ip4_src_for(...)".
             snippet = stripped if C_FUNC_RE.match(line) else (prev_line.strip() + " " + stripped)
             insert_symbol(con, name, "function", rpath, lineno, snippet[:240], comment, commented_out, guarded_by)
+        elif wrapped:
+            # Last resort: the parameter list wrapped. The joined text is matched, but the symbol is
+            # recorded at the line the definition STARTS on, not where its arguments happen to end,
+            # so every line number already written into a knowledge base keeps meaning what it meant.
+            name = c_function_name(wrapped)
+            if name:
+                insert_symbol(con, name, "function", rpath, lineno, wrapped.strip()[:240],
+                              comment, commented_out, guarded_by)
 
     if ext in JS_LIKE_EXTS:
         name = js_function_name(line)
@@ -1699,7 +1753,9 @@ def scan_definitions(con: sqlite3.Connection, path: Path, text: str,
         if comment and indexed_symbol_name(ext, line, prev_code_line):
             attached_ranges.update(symbol_comment_ranges_for_leading_comments(ranges, lexed.lines, lineno))
         scan_definition_line(con, rpath, ext, lineno, line, comment,
-                             prev_line=prev_code_line, guarded_by=guards.current())
+                             prev_line=prev_code_line, guarded_by=guards.current(),
+                             wrapped=(join_wrapped_signature(lexed.non_comment_lines, lineno - 1)
+                                      if ext in C_LIKE_EXTS else ""))
         for marker in (API_RE.findall(line) if API_RE else ()):
             con.execute(
                 "INSERT INTO api_markers(marker, file, line, context) VALUES(?,?,?,?)",
