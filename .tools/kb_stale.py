@@ -161,7 +161,16 @@ def kb_dirs():
     conf = _config().get("annotations") or "Docs/source_index_annotations.json"
     if isinstance(conf, str):
         conf = [conf]
-    return [os.path.join(ROOT, c) for c in conf]
+    # A KB ROOT MAY BE OUTSIDE THE REPOSITORY, AND IS OFTEN WRITTEN WITH `~`. Joining "~/kb/x" to
+    # ROOT produces "<repo>/~/kb/x", which exists nowhere -- so the walk found no entries, every
+    # check reported ok, and the run exited 0 on a knowledge base it had never opened. Measured on
+    # a 299-entry KB kept in a sibling worktree: 0 entries loaded, 5 checks "ok".
+    # expanduser first, and only then treat a still-relative path as repo-relative.
+    out = []
+    for c in conf:
+        c = os.path.expanduser(c)
+        out.append(c if os.path.isabs(c) else os.path.join(ROOT, c))
+    return out
 
 
 def load_roots():
@@ -198,8 +207,35 @@ def _entries_under(base):
                         body_at = i + 1
                         break
                     m = re.match(r'^(\w+):\s*(.*)$', lines[i])
-                    if m and m.group(2).strip():
-                        fm[m.group(1)] = m.group(2).strip()
+                    if not m:
+                        continue
+                    if m.group(2).strip():
+                        v = m.group(2).strip()
+                        # An INLINE list is a list: "files: []" is empty, not a path named "[]",
+                        # and "files: [a, b]" is two. Without this the empty form became a referent
+                        # and was faithfully reported missing, once per entry that had one.
+                        if v.startswith("[") and v.endswith("]"):
+                            inner = v[1:-1].strip()
+                            fm[m.group(1)] = [x.strip().strip('"\'')
+                                              for x in inner.split(",") if x.strip()] if inner else []
+                        else:
+                            fm[m.group(1)] = v
+                        continue
+                    # A BLOCK LIST IS STILL A VALUE. Reading only "key: value" made every
+                    # `files:` list an EMPTY key, so on a KB that writes its referents as a list
+                    # the file check inspected nothing and reported ok -- a check that passes
+                    # because it is not looking, which is the exact failure this tool exists to
+                    # catch. Measured on a 299-entry KB: 24 entries named a file, 0 were checked.
+                    items = []
+                    for j in range(i + 1, len(lines)):
+                        li = re.match(r'^\s+-\s+(.*)$', lines[j])
+                        if not li:
+                            break
+                        v = li.group(1).strip().strip('"\'')
+                        if v:
+                            items.append(v)
+                    if items:
+                        fm[m.group(1)] = items
             out.append((p, fm, "\n".join(lines[body_at:])))
     return out
 
@@ -247,6 +283,168 @@ def load_index(db):
     return resolve, by_file, files
 
 
+# ---------------------------------------------------------------------------------------------
+# ONE KNOWLEDGE BASE, SEVERAL LONG-LIVED BRANCHES.
+#
+# A KB is often shared by branches that are not merged into one another, and then a referent is not
+# simply present or absent -- it can be CORRECT SOMEWHERE ELSE. The case this was written for: an
+# implementation file renamed on one branch only, so ~21 entries naming the old path look stale
+# from the new branch, and the obvious repair (rewrite them to the new name) breaks every one of
+# them on the branches where the old name is the real and only name.
+#
+# So there are three answers, not two, and the third has to be SAID rather than folded into either
+# neighbour: "missing here" and "wrong" are different findings, and a checker that conflates them
+# reports false alarms on a correct KB -- which is how a check gets switched off.
+#
+# THE TIERS DEGRADE DIFFERENTLY PER CHECK, because they are answered by different things:
+#
+#   file-exists, citation-range   git. Any branch, no index, works on a fresh clone.
+#   symbol-exists, symbol-live    the branch's INDEX -- and code_index.*.sqlite is generated and
+#                                 normally gitignored, so a fresh clone has exactly ONE. Widening
+#                                 a symbol check is therefore best-effort: where a branch has no
+#                                 index we say UNRESOLVED, never "missing", and fall back to
+#                                 asking git whether the name appears in that branch's file at all.
+BRANCH_CACHE = {}
+
+
+def git_out(args):
+    try:
+        return subprocess.check_output(["git", "-C", ROOT] + args,
+                                       stderr=subprocess.DEVNULL).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def current_branch():
+    return git_out(["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+
+
+def sibling_branches(limit_to=None):
+    """Local branches other than the current one, newest first.
+
+    Newest first because a rename is usually recent, so the branch that explains a referent tends
+    to be near the top and the search stops early.
+    """
+    key = ("siblings", tuple(limit_to) if limit_to else None)
+    if key in BRANCH_CACHE:
+        return BRANCH_CACHE[key]
+    cur = current_branch()
+    out = git_out(["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)",
+                   "refs/heads"])
+    names = [b.strip() for b in out.splitlines() if b.strip() and b.strip() != cur]
+    if limit_to:
+        wanted = set(limit_to)
+        names = [b for b in names if b in wanted]
+    BRANCH_CACHE[key] = names
+    return names
+
+
+def path_on_branch(branch, path):
+    key = ("exists", branch, path)
+    if key not in BRANCH_CACHE:
+        BRANCH_CACHE[key] = subprocess.call(
+            ["git", "-C", ROOT, "cat-file", "-e", "%s:%s" % (branch, path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    return BRANCH_CACHE[key]
+
+
+def branches_holding(path, branches):
+    return [b for b in branches if path_on_branch(b, path)]
+
+
+def blob_line_count(branch, path):
+    key = ("lines", branch, path)
+    if key not in BRANCH_CACHE:
+        txt = git_out(["show", "%s:%s" % (branch, path)])
+        BRANCH_CACHE[key] = txt.count("\n") + (1 if txt and not txt.endswith("\n") else 0) if txt else None
+    return BRANCH_CACHE[key]
+
+
+def indexed_branches(branches):
+    """Which of these branches have an index on disk -- the only ones a symbol check can use."""
+    have = []
+    for b in branches:
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", b).strip("._-")
+        if os.path.exists(os.path.join(HERE, "code_index.%s.sqlite" % slug)):
+            have.append((b, os.path.join(HERE, "code_index.%s.sqlite" % slug)))
+    return have
+
+
+def name_in_branch_file(branch, path, name):
+    """Cheap fallback when a branch has no index: does that branch's copy even mention the name?
+
+    Weaker than an index -- it cannot tell a definition from a mention -- so it is only ever used
+    to downgrade a claim, never to make one.
+    """
+    if not path:
+        return False
+    txt = git_out(["show", "%s:%s" % (branch, path)])
+    return bool(txt) and re.search(r"\b%s\b" % re.escape(name), txt) is not None
+
+
+def _widen_symbol(name, src, siblings, sib_indexed):
+    """Where else could this symbol be defined? -> (found_on, maybe_on, blind_count)
+
+    found_on   branches whose INDEX defines it -- as good an answer as the current branch gives
+    maybe_on   branches with no index whose copy of the file at least CONTAINS the name
+    blind      branches that could be neither confirmed nor denied
+
+    The split exists so a missing index never reads as a missing symbol. Widening a symbol check is
+    best-effort by construction: code_index.*.sqlite is generated and normally gitignored, so a
+    fresh clone has one index and the honest answer for every other branch is "unresolved".
+    """
+    found_on, maybe_on, blind = [], [], 0
+    for b in siblings:
+        db = sib_indexed.get(b)
+        if db:
+            try:
+                con = sqlite3.connect(db)
+                row = con.execute(
+                    "SELECT 1 FROM symbols WHERE name = ? OR name LIKE '%::' || ? LIMIT 1",
+                    (name, name)).fetchone()
+                con.close()
+            except Exception:
+                row = None
+                blind += 1
+                continue
+            if row:
+                found_on.append(b)
+        elif src and name_in_branch_file(b, src, name):
+            maybe_on.append(b)
+        else:
+            blind += 1
+    return found_on, maybe_on, blind
+
+
+def branch_paths_by_basename(branch):
+    """basename -> [paths] for one branch, from git. Cached: one ls-tree per branch.
+
+    A citation names a BASENAME ("single_wire.cpp:272"), and the entry does not always list the
+    file among its referents -- often it is only mentioned in prose. So the range check needs its
+    own way to ask "is there a file of this name, long enough, on another branch?" without an index
+    there and without the entry's help.
+    """
+    key = ("bybase", branch)
+    if key not in BRANCH_CACHE:
+        idx = {}
+        for line in git_out(["ls-tree", "-r", "--name-only", branch]).splitlines():
+            line = line.strip()
+            if line:
+                idx.setdefault(os.path.basename(line).lower(), []).append(line)
+        BRANCH_CACHE[key] = idx
+    return BRANCH_CACHE[key]
+
+
+def citation_fits_elsewhere(base, ln, siblings):
+    """Is there a copy of this basename on a sibling branch with at least `ln` lines?"""
+    for b in siblings:
+        for path in branch_paths_by_basename(b).get(base.lower(), []):
+            n = blob_line_count(b, path)
+            if n is not None and n >= ln:
+                return b, path, n
+    return None
+
+
 def line_count(path):
     try:
         with io.open(path, "rb") as fh:
@@ -284,7 +482,26 @@ def main():
     ap.add_argument("--db")
     ap.add_argument("--no-git", action="store_true", help="skip the freshness check")
     ap.add_argument("--quiet", action="store_true", help="problems only, no REVIEW lines")
+    ap.add_argument("--branches", default="current", metavar="current|all|a,b,c",
+                    help="where a referent may live. 'current' (default) judges only the checked-out "
+                         "branch; 'all' widens to every local branch when the current one misses, and "
+                         "NAMES the branch that satisfies it; a comma-separated list restricts that "
+                         "widening. Use it when one knowledge base is shared by branches that are not "
+                         "merged into one another")
+    ap.add_argument("--strict", action="store_true",
+                    help="treat a referent that resolves only on ANOTHER branch as a problem. Off by "
+                         "default because on a shared KB that is the CORRECT state, not a defect")
     a = ap.parse_args()
+
+    if a.branches == "current":
+        siblings = []
+    elif a.branches == "all":
+        siblings = sibling_branches()
+    else:
+        siblings = sibling_branches([b.strip() for b in a.branches.split(",") if b.strip()])
+    sib_indexed = dict(indexed_branches(siblings))
+    elsewhere = []
+    unresolved = []
 
     global INDEX_ROOTS
     INDEX_ROOTS = load_roots()
@@ -313,13 +530,36 @@ def main():
 
         # frontmatter "file:" is sometimes "path/to/thing.cpp:416" - the line is part of the
         # provenance, not the path. The first run reported 6 files "missing" for exactly this.
-        src = (fm.get("file") or "").strip()
-        src_line = None
-        m = re.match(r'^(.*?):(\d+)$', src)
-        if m:
-            src, src_line = m.group(1), int(m.group(2))
-        if src and not os.path.exists(os.path.join(ROOT, src)):
-            problems["file-exists"].append("%s -> %s" % (rel, src))
+        # `file:` (one) and `files:` (a list) are both in use. Every referent is checked; the
+        # first is kept as `src` because the later checks want one file to anchor to -- the
+        # directory a citation most likely means, and the blob to range-check against.
+        raw = fm.get("files") or fm.get("file") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        refs = []
+        for r in raw:
+            r = (r or "").strip()
+            if not r:
+                continue
+            m = re.match(r'^(.*?):(\d+)$', r)
+            refs.append(m.group(1) if m else r)
+        src = refs[0] if refs else ""
+        src_here = bool(src) and os.path.exists(os.path.join(ROOT, src))
+        src_on = []
+        ref_on = {}            # referent -> branches that have it, for referents absent HERE
+        for r in refs:
+            if os.path.exists(os.path.join(ROOT, r)):
+                continue
+            on = branches_holding(r, siblings)
+            ref_on[r] = on
+            if r == src:
+                src_on = on
+            if on:
+                # THE THIRD ANSWER. Not missing, not wrong -- correct, on a branch that is not this
+                # one. Reported with the branch named so nobody "repairs" it into being wrong here.
+                elsewhere.append("%s -> %s (on %s)" % (rel, r, ", ".join(on[:3])))
+            else:
+                problems["file-exists"].append("%s -> %s" % (rel, r))
 
         # ONLY A SYMBOL THE INDEX COULD SEE CAN BE REPORTED MISSING. kb.config.json names the
         # indexed roots (here xfox and xfoxcmd); the KB also holds entries about VEO's C#, about
@@ -335,7 +575,18 @@ def main():
             hits = resolve(name)
             if not hits:
                 if os.sep + "symbols" + os.sep in path and in_roots:
-                    problems["symbol-exists"].append("%s -> %s (in %s)" % (rel, name, src))
+                    found_on, maybe_on, blind = _widen_symbol(name, src, siblings, sib_indexed)
+                    if found_on:
+                        elsewhere.append("%s -> %s (defined on %s)" % (rel, name, ", ".join(found_on[:3])))
+                    elif maybe_on:
+                        # git can see the NAME in that branch's file but cannot tell a definition
+                        # from a mention, so this downgrades the claim rather than making one.
+                        unresolved.append("%s -> %s (name present on %s, not indexed there)"
+                                          % (rel, name, ", ".join(maybe_on[:3])))
+                    elif blind:
+                        unresolved.append("%s -> %s (%d branch(es) not indexed)" % (rel, name, blind))
+                    else:
+                        problems["symbol-exists"].append("%s -> %s (in %s)" % (rel, name, src))
                 else:
                     uncheckable += 1
             elif all(co for (_f, _l, co, _n) in hits):
@@ -345,8 +596,35 @@ def main():
         for m in CITATION.finditer(body):
             base, ln = m.group(1), int(m.group(2))
             checked_citations += 1
+            # THE AUTHORITATIVE FILE MAY NOT BE ON THIS BRANCH, and then a same-named file that
+            # IS here is the wrong yardstick. Measured: `single_wire.cpp:272` range-checked against
+            # a 24-line Eth2Serial/single_wire.cpp shim while the real 500-line file lives at
+            # wt32-eth01/main/ on the other branches -- 15 citations reported out of range, every
+            # one of them correct. When the entry's own referent names this basename and resolves
+            # only elsewhere, measure against THAT blob and nothing else.
+            # ANY of the entry's referents may be the file this citation means -- not just the
+            # first. Keying on refs[0] left 14 citations still measured against the wrong same-named
+            # file, because the entry listed that file second.
+            elsewhere_ref = next((r for r, on in ref_on.items()
+                                  if on and os.path.basename(r) == base), None)
+            if elsewhere_ref:
+                n = blob_line_count(ref_on[elsewhere_ref][0], elsewhere_ref)
+                if n is not None:
+                    if ln > n:
+                        problems["citation-range"].append(
+                            "%s -> %s:%d (%s has %d lines on %s)"
+                            % (rel, base, ln, elsewhere_ref, n, ref_on[elsewhere_ref][0]))
+                    continue
+
             cands = index_files.get(base.lower())
             if not cands:
+                # Not in THIS branch's index. It may still be a real file on a sibling, where the
+                # citation can be range-checked from the blob without any index at all.
+                if siblings and src_on:
+                    n = blob_line_count(src_on[0], src) if src and os.path.basename(src) == base else None
+                    if n is not None and ln > n:
+                        problems["citation-range"].append(
+                            "%s -> %s:%d (%s has %d lines on %s)" % (rel, base, ln, src, n, src_on[0]))
                 continue                                   # file not in the indexed roots
 
             # A BASENAME IS NOT A FILE. This tree carries copy-paste forks - five CorrectionSet.cpp,
@@ -364,6 +642,16 @@ def main():
             lengths = [(c, line_count(os.path.join(ROOT, c))) for c in ordered]
             usable = [(c, n) for c, n in lengths if n is not None]
             if usable and all(ln > n for _c, n in usable):
+                # BEFORE CALLING IT OUT OF RANGE, ASK THE OTHER BRANCHES. The same basename can be
+                # a 24-line shim here and the real 900-line implementation there -- measured:
+                # Eth2Serial/single_wire.cpp against wt32-eth01/main/single_wire.cpp. Six citations
+                # were reported out of range against the shim, and every one of them was correct.
+                fit = citation_fits_elsewhere(base, ln, siblings) if siblings else None
+                if fit:
+                    b, path, n = fit
+                    elsewhere.append("%s -> %s:%d (fits %s, %d lines, on %s)"
+                                     % (rel, base, ln, path, n, b))
+                    continue
                 c, n = usable[0]
                 problems["citation-range"].append(
                     "%s -> %s:%d (%s has %d lines%s)"
@@ -393,6 +681,16 @@ def main():
 
     print("\n  index   : %s" % os.path.basename(db))
     print("  entries : %d" % len(ents))
+    if not ents:
+        # NOT "ok". Five checks over an empty set pass trivially, and a green run on a KB nobody
+        # opened is worse than a red one -- it is the same silent-success failure this tool was
+        # written to find, turned on itself.
+        print("  result: NO ENTRIES FOUND -- nothing was checked")
+        for d in kb_dirs():
+            print("      %s %s" % ("ok     " if os.path.isdir(d) else "MISSING", d))
+        print("  Check `annotations` in kb.config.json. Exiting non-zero because five checks over"
+              " an empty set are not a pass.")
+        return 2
     print("  citations checked: %d" % checked_citations)
     print("  indexed roots: %s" % ", ".join(INDEX_ROOTS))
 
@@ -407,6 +705,31 @@ def main():
                 print("      %s" % s)
             if len(items) > 12:
                 print("      ... and %d more" % (len(items) - 12))
+
+    if elsewhere:
+        # STRICT MAKES IT A FAILURE, DEFAULT DOES NOT. On a knowledge base shared by unmerged
+        # branches this state is CORRECT -- the entry describes code that lives on another line --
+        # so counting it by default would report a healthy KB as broken. Under --strict it counts,
+        # for a gate that wants one branch to be self-contained.
+        print("\n  check: resolves-only-elsewhere")
+        print("  result: %s" % ("PROBLEM" if a.strict else "REVIEW"))
+        print("  detail: %d referent(s) do not exist here but DO on another branch" % len(elsewhere))
+        for x in elsewhere[:12]:
+            print("      %s" % x)
+        if len(elsewhere) > 12:
+            print("      ... and %d more" % (len(elsewhere) - 12))
+        if a.strict:
+            total += len(elsewhere)
+
+    if unresolved and not a.quiet:
+        print("\n  check: unresolved-elsewhere")
+        print("  result: REVIEW")
+        print("  detail: %d symbol(s) could not be confirmed on other branches "
+              "(no index there -- build one to decide)" % len(unresolved))
+        for x in unresolved[:8]:
+            print("      %s" % x)
+        if len(unresolved) > 8:
+            print("      ... and %d more" % (len(unresolved) - 8))
 
     if not a.quiet:
         print("\n  check: freshness")
@@ -429,7 +752,14 @@ def main():
             if len(byfile) > 10:
                 print("      ... and %d more file(s)" % (len(byfile) - 10))
 
-    print("\n  %d problem(s)%s" % (total, "" if a.no_git else ", %d to review" % len(review)))
+    print("\n  branches: %s" % (a.branches if siblings or a.branches != "current"
+                                   else "current only (%s)" % (current_branch() or "?")))
+    if siblings:
+        print("  widened to: %s%s" % (", ".join(siblings[:6]),
+                                      "" if len(siblings) <= 6 else " (+%d)" % (len(siblings) - 6)))
+        print("  of those, indexed: %s" % (", ".join(sorted(sib_indexed)) or "none"))
+    print("  %d problem(s)%s%s" % (total, "" if a.no_git else ", %d to review" % len(review),
+                                   "" if not elsewhere else ", %d elsewhere" % len(elsewhere)))
     return 1 if total else 0
 
 

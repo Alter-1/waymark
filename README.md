@@ -208,6 +208,25 @@ python3 .tools/query_code_index.py links compaction
 python3 .tools/query_code_index.py broken-links
 ```
 
+### One knowledge base, several branches
+
+`selftest` and `broken-links` ask whether a KB is consistent with **itself**. `kb_stale.py` asks
+whether it is still true of the **code** — the direction knowledge actually rots in.
+
+```bash
+python3 .tools/kb_stale.py                              # judge against the checked-out branch
+python3 .tools/kb_stale.py --branches all               # ...or any branch, naming which one
+python3 .tools/kb_stale.py --branches 1.18,2.0 --strict # ...and fail if it is not this branch
+```
+
+When branches are long-lived and not merged into one another, a referent has **three** possible
+answers, not two: here, nowhere, or *correct on another branch*. The third gets its own heading
+with the branch named, because "missing here" and "wrong" are different findings — and a checker
+that conflates them reports false alarms on a healthy KB, which is how a check gets switched off.
+
+`file-exists` and `citation-range` are answered by git and widen for free. `symbol-exists` needs
+that branch's index, so where none exists the answer is *unresolved*, never *missing*.
+
 A link may target `symbol:`, `constant:`, `annotation:`, `concept:`, `route:`, `comment:` or
 `file:`. Two conveniences worth knowing:
 

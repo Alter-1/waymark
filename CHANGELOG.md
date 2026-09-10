@@ -8,6 +8,44 @@ getting; the commit messages carry the reasoning and the measurements behind the
 ## 2026-09-10
 
 ### Added
+* **`kb_stale --branches`** — one knowledge base, several long-lived branches. A referent is then
+  not simply present or absent: it can be **correct somewhere else**. `--branches current` (the
+  default) is unchanged; `--branches all` (or a comma-separated list) widens the search when the
+  current branch misses and **names the branch that satisfies it**, under a new
+  `resolves-only-elsewhere` heading. `--strict` turns that into a failure, for a gate that wants
+  one branch to be self-contained.
+
+  Measured on a 299-entry KB shared by four branches, from the branch where an implementation file
+  had been renamed: **23 file referents and 15 citations reported as problems became 0 and 2** — and
+  one of the two survivors was a genuinely stale citation (`local_hw.cpp:1085`, where no branch's
+  copy is longer than 842 lines), which is the tool doing its job. The repair those false alarms
+  invite — rewriting the paths to the new name — would have broken every one of them on the
+  branches where the old name is the real and only name.
+
+  The tiers degrade differently per check, and that is deliberate: `file-exists` and
+  `citation-range` are answered by **git**, so they widen to any branch for free and work on a
+  fresh clone. `symbol-exists` needs that branch's **index**, and `code_index.*.sqlite` is
+  generated and normally gitignored — so where a branch has no index the answer is **unresolved**,
+  never "missing", with a git-grep fallback that can only ever downgrade a claim.
+
+### Fixed
+* **A KB root written with `~` was silently never opened.** `~/kb/x` was joined to the repo root,
+  producing `<repo>/~/kb/x`, which exists nowhere — so the walk found no entries, all five checks
+  reported `ok`, and the run exited 0 on a knowledge base it had never read. Roots are expanded
+  before use, and **zero entries is now reported as such and exits non-zero**: five checks over an
+  empty set are not a pass, and a green run on a KB nobody opened is the same silent-success
+  failure this tool exists to find, turned on itself.
+* **Frontmatter lists are read.** Only `key: value` scalars were parsed, so a KB writing its
+  referents as a `files:` block list (or inline `[a, b]`) had **every one of them ignored** —
+  the file check inspected nothing and said `ok`. Both spellings and both list forms now work, and
+  every referent is checked rather than only the first.
+* **A citation is measured against the right file.** The same basename can be a 24-line shim on one
+  branch and the real implementation on another; six citations were reported out of range against
+  the shim, and all six were correct.
+
+## 2026-09-10
+
+### Added
 * **`kb_stale.py`** — is the knowledge base still **true of the code**? `selftest` has ten checks
   and all ten are about a KB's internal consistency; every one passes on a KB that is perfectly
   consistent and completely out of date. This checks the other direction: the entry's `file:` still
