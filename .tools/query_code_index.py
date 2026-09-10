@@ -651,7 +651,19 @@ def main() -> int:
                "                      AND a.status <> 'deleted')"
                "   AND NOT EXISTS (SELECT 1 FROM symbols c WHERE c.name = b.name)"
                "   AND NOT EXISTS (SELECT 1 FROM constants k WHERE k.name = b.name)"
-               "   AND length(b.name) >= ?")
+               "   AND length(b.name) >= ?"
+               # A NAME THAT GAINED ITS CLASS PREFIX WAS NOT DELETED, and neither filter above
+               # catches it: the name is long, and both sides are the same language. Moving an
+               # inline out of a header renames the symbol in ONE indexing run - the bare row goes
+               # deleted, the qualified row arrives - while every call site still writes the bare
+               # name.
+               #
+               # Measured on a 3000-file C++ tree, where it was the only finding and it was false:
+               #   branch_symbols  GetResolutionDivisor           Camera.h:2074   deleted 06-09 08:15
+               #   branch_symbols  CCamera::GetResolutionDivisor  Camera.cpp:4494 added   06-09 08:15
+               # Same timestamp. The header still declares it, the .cpp defines it, and all seven
+               # "dangling" sites are ordinary calls.
+               "   AND NOT EXISTS (SELECT 1 FROM symbols q WHERE q.name LIKE '%::' || b.name)")
         params = [branch, args.min_len]
         if args.kind:
             sql += " AND b.kind = ?"
