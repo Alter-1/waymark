@@ -108,6 +108,38 @@ It answers from what the index remembers, so it needs a build from **before** th
 and one from after; on a fresh clone with no history it has nothing to compare and says so by
 staying quiet.
 
+### Whether the knowledge base is still true
+
+```bash
+python3 .tools/kb_stale.py            # after index_code.py
+python3 .tools/kb_stale.py --no-git   # skip the freshness pass, much faster
+```
+
+`selftest` checks a KB's **internal** consistency — links resolve, the vocabulary is known, a
+headline does not contradict its own status. Every one of those passes on a knowledge base that is
+perfectly consistent and completely out of date. `kb_stale` checks the other direction: does the
+entry still describe **the code**?
+
+| check | a hit means |
+|---|---|
+| `file-exists` | the entry's `file:` no longer resolves |
+| `symbol-exists` | the index does not know its `name:` — either it went, **or the indexer never saw it** |
+| `symbol-live` | every definition of that name is commented out |
+| `citation-range` | a `file.cpp:NNN` in the body points past the end of that file |
+| `freshness` | the cited file has commits **after** the entry's `ts:` — REVIEW, never a failure |
+
+Non-zero exit on a problem, so it can gate a build the way `selftest` does.
+
+Two things it will not do. It does not judge prose — "this function is slow" has no definite answer.
+And it does not rewrite anything: a stale entry might need its citation corrected or its finding
+deleted, and only a person can tell which.
+
+Read the hits before believing them. Its first run against a real 3000-file tree reported **149
+problems and almost all were the tool's own fault** — bare names against qualified symbols, a line
+number inside a frontmatter path, entries about code outside the indexed roots. 149 → 1, and the one
+that survived was real. Those cases are the test suite now, because they are the same mistakes any
+query is subject to.
+
 ## The knowledge base
 
 ```bash

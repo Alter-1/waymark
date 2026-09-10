@@ -5,6 +5,57 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-10
+
+### Added
+* **`kb_stale.py`** — is the knowledge base still **true of the code**? `selftest` has ten checks
+  and all ten are about a KB's internal consistency; every one passes on a KB that is perfectly
+  consistent and completely out of date. This checks the other direction: the entry's `file:` still
+  resolves, the index still knows its `name:`, that name is not present only as a commented-out
+  definition, a `file.cpp:NNN` citation points inside the file, and — as REVIEW, never a failure —
+  the cited file has not been committed to since the entry was written. Non-zero exit on a problem,
+  so it can gate a build.
+
+  It does **not** judge prose, and it does not rewrite anything: a stale entry might need its
+  citation corrected or its finding deleted, and only a person can tell which.
+
+  Its first run on a real 3000-file tree reported **149 problems, and almost all were the tool's own
+  fault** — bare names matched against qualified symbols, a line number inside a frontmatter `file:`
+  path, entries about code outside the indexed roots. 149 → 1. Those are the test cases now; a
+  checker that cries wolf is one people learn to skip, and it takes the true findings with it.
+
+### Fixed
+* **A definition whose parameter list wraps is a definition.** The matcher required the closing `)`
+  on the definition line, and the split form beside it is for the opposite shape — name first,
+  return type on the line before. Neither covered
+
+  ```cpp
+  bool Store::copy_range(const std::string& first_key, const std::string& last_key,
+                         Store* into, bool overwrite_existing) {
+  ```
+
+  which is how a great deal of C++ is written once a signature outgrows a line. Such a function got
+  **no symbol row at all**: no notes, no refs, no graph, and any KB entry naming it read as stale.
+  On one 3000-file tree that was **575 invisible functions** — `files` and `constants` unchanged, so
+  nothing else moved. It is recorded at the line the definition **opens** on, so citations already
+  written against it keep meaning what they meant. Found, fittingly, by `kb_stale` reporting entries
+  whose symbol "did not exist" against an index newer than the sources.
+
+* **`dangling-refs` no longer calls a qualified name deleted.** Moving an inline out of a header
+  renames the symbol from `ratio` to `Thing::ratio` in a single indexing run: the bare row goes
+  deleted, the qualified row arrives, and every call site still writes the bare name.
+
+  A third filter class, and neither of the two added the same day catches it: the name is long, so
+  the length floor passes it, and both sides are the same language, so the family check passes it
+  too. On one 3000-file C++ tree it was the **only** finding and it was false — the rate that
+  teaches a reader to ignore a command, which is the reasoning every one of these filters exists
+  under.
+
+* **The test suite's exit code now sees every check.** `if FAILED: return 1` sits partway up
+  `main()`, with roughly 350 lines of cases after it — the html lexer, the js vars, `dangling-refs`.
+  A failure in any of those printed `FAIL` and then fell through to `all passed` and exit 0. Caught
+  while adding cases below it: two printed FAIL, the run said `all passed`, and the exit code was 0.
+
 ## 2026-09-09 (later)
 
 ### Added
