@@ -222,6 +222,50 @@ So when a result finally arrives: check it against a value you picked, not again
 of it. Round numbers, byte-swaps, and off-by-a-header-length are the shapes to distrust, and all
 three survive a reader who is looking for *whether* there is output rather than *which* output.
 
+### An instrument cannot report the gap in its own definition
+
+The sections above assume a tool that is broken. The harder case is a tool that works exactly as
+written, while what was written is an incomplete statement of what you meant.
+
+**Its silence is then indistinguishable from absence.** A clean result means *nothing matched my
+definition* — and the definition is the part you had not finished forming, so the tool cannot report
+the gap it has. It answers on its own terms, always, and answering confidently is what makes it
+dangerous.
+
+This is not an argument against instruments. It is an argument that an instrument needs a second,
+**independent** source of truth, and that the sources must not share a definition. In rough order of
+what they buy:
+
+* **An expectation derived from the DOMAIN, not from the artefact.** If the hardware has three
+  identical ports, the interface that configures them should have three identical sections — and
+  that claim comes from the world, not from the code, so checking one against the other is real
+  evidence. Where they disagree, one of them is wrong and either answer is worth having: a genuine
+  difference, or a gap nobody had noticed. This is the strongest move available, because it is the
+  only one whose second opinion was not written by the same hand.
+* **Back-testing against what was already found by hand.** Necessary, and weaker than it feels: it
+  proves coverage of the KNOWN and says nothing about the class still missed. Passing it means *not
+  obviously broken*, never *good*.
+* **Review by someone who does not know what you were looking for.** The value is decorrelation, not
+  attention: a reviewer told your hypothesis will look where you looked and inherit your blind spot.
+  So ask them to enumerate what they would expect the tool to find **before** showing them what it
+  found. The disagreements are the output.
+* **Constructing the false pass.** Ask what a wrong "clean" would look like, then build it. And make
+  the tool emit a QUANTITY rather than a verdict, so an impossible magnitude betrays it: a request
+  that "failed the deadline" in two milliseconds against a one-second timeout did not test the
+  deadline, and only the number says so.
+* **Writing the negative space into the tool.** Its own documentation should state what it CANNOT
+  see, so that silence becomes readable instead of reassuring.
+
+**And one limit no protocol removes: a tool matches text, a person matches meaning.** A concept
+spelled two different ways is invisible to any normaliser, and "this idea has become load-bearing"
+is a judgement no scan makes. When someone counts more instances of a thing than your search
+returned, they are usually counting the concept while you counted the string — and the difference is
+where the defect tends to live.
+
+None of this closes the gap. You cannot validate a definition you have not finished forming; you can
+only keep its edges visible and keep a second source in play. A procedure that promised completeness
+here would be the same overconfidence wearing a new costume.
+
 ---
 
 ## 5. Git, especially in a tree someone else is using
@@ -396,7 +440,9 @@ of it could ever reach them.
 
 ## The shortest version
 
-Verify before you fix. Explain before you edit. Make absence loud. Prove a search can succeed
+Verify before you fix. Explain before you edit. Make absence loud. Do not ask whether your
+instrument works — ask what the world says should be there, and whether the instrument would have
+told you if it were not. Prove a search can succeed
 before believing it failed, and check a result you did get against a value you chose. Assert state
 in the same breath as the action that depends on it — and assert that your edit matched, because a
 replace that finds nothing exits 0. Never let the instrument destroy what it measures. Prove
