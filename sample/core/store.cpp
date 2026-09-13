@@ -98,3 +98,25 @@ bool Snapshot::capture(const Store& from) {
 void Snapshot::reset() {
     entries_ = 0;
 }
+
+// ------------------------------------------------------------------------------------------
+// A SUPERSEDED IMPLEMENTATION, KEPT AS A COMMENT. Some houses replace code by commenting the
+// old version out rather than deleting it, so that a rejected approach stays visible where the
+// next person would otherwise be tempted to try it again. Where that is the convention the
+// density of commented-out code is high, and an indexer that cannot tell it from live code is
+// actively misleading: it reports definitions that do not exist and call sites that never run.
+//
+// This block is a FIXTURE. It exists so the tests can assert two separate things:
+//   1. a commented-out DEFINITION is indexed with commented_out = 1, not omitted and not
+//      counted as live;
+//   2. a call written inside a comment produces NO row in refs at all, so anything built on
+//      refs - a call graph, a "who deletes this" query - is free of dead edges by construction.
+//
+// bool Snapshot::capture_slow(const Store& from) {
+//     entries_ = 0;
+//     for (int i = 0; i < from.live_keys(); ++i) {
+//         entries_ += from.probe_key(i);
+//     }
+//     reset();
+//     return entries_ > 0;
+// }

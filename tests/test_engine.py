@@ -1471,9 +1471,19 @@ def main():
               ".cs was indexed without being configured")
 
     print()
+    # _AT_ 130926  DO NOT RETURN HERE. This used to be `if FAILED: return 1`, which stopped the run
+    # dead on the first failure - and roughly 460 lines of cases live below it. The consequence is
+    # not just missing signal: it makes every later case UNFALSIFIABLE, because a negative control
+    # that breaks the engine trips an earlier case and the run never reaches the case under test.
+    # Observed while adding the commented-out cases below: the engine was deliberately broken, an
+    # earlier HTML case failed as it should, the suite returned at this line, and the new cases were
+    # reported neither pass nor fail - which reads exactly like "my test does not work".
+    #
+    # The comment near the end of this function already describes the mirror of this problem (FAILs
+    # printed, then "all passed", exit 0) and fixed it THERE. This is the other half. The summary
+    # and the exit code are both at the end now; nothing in between should short-circuit them.
     if FAILED:
-        print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
-        return 1
+        print(f"   ({len(FAILED)} failure(s) so far: " + ", ".join(FAILED) + ") - continuing")
     # A DEFINITION SPLIT OVER TWO LINES -- the return type on its own line, the name on the next.
     # lwIP and BSD-derived C are written this way throughout, and the single-line matcher saw none
     # of it: netif.c yielded 27 symbols (macros and parameters) instead of its ~30 functions, while
@@ -1817,6 +1827,62 @@ def main():
         rc, out, _ = query("dangling-refs", cwd=proj)
         check("a definition that only gained its class prefix is not 'deleted'",
               "ratio" not in out, out[:300])
+
+    # COMMENTED-OUT CODE MUST BE DISTINGUISHABLE FROM LIVE CODE, IN BOTH DIRECTIONS.
+    #
+    # Some houses replace code by commenting the old version out rather than deleting it, so a
+    # rejected approach stays visible where the next person would be tempted to retry it. Where
+    # that is the convention the density of commented-out code is high, and an indexer that cannot
+    # tell it from live code is actively misleading: it reports definitions that do not exist and
+    # call sites that never run.
+    #
+    # WHAT WAS AND WAS NOT ALREADY COVERED, checked rather than assumed. `commented_out` on a
+    # DEFINITION was already tested - "markup inside <!-- --> is NOT live" above - and that case
+    # duly failed when the flag was deliberately inverted. What had NO coverage at all was the
+    # other half: that a call written inside a comment produces no row in `refs`. Everything built
+    # on `refs` - a call graph, a "what reaches this teardown" query - depends on it, and would
+    # start inventing edges with no signal whatever if it regressed. These cases add the C++
+    # definition shape and, more importantly, that missing half.
+    #
+    # HOW FAR EACH OF THESE IS PROVEN, stated plainly rather than assumed. The two DEFINITION
+    # cases are falsifiable and were verified failing: inverting the commented_out argument in
+    # index_code.py makes both report FAIL with their detail ([(0,)] and live=1). The REF case was
+    # NOT verified failing - two attempts to break the comment filter did not reach the code path
+    # the test exercises, because `code_lines` comes from a cache populated elsewhere and the
+    # uncached branch never runs here. So treat it as a lock on current behaviour rather than as a
+    # proven detector, and if you change ref scanning, break it deliberately and check this case
+    # actually moves.
+    #
+    # BUILT IN A TEMP TREE ON PURPOSE. The first version of this case asserted against the
+    # repository's own index and passed even when the flag was deliberately corrupted first - the
+    # suite rebuilds that index during its own run, so the planted fault was overwritten before the
+    # assertion. A test that cannot fail is not a test; this one owns its input.
+    with tempfile.TemporaryDirectory() as td:
+        import sqlite3 as _sq3
+        proj = Path(td) / "p"
+        shutil.copytree(ROOT, proj, ignore=shutil.ignore_patterns(
+            ".git", "*.sqlite", "*.json.bak*", "__pycache__"))
+        # a commented-out DEFINITION, and inside it a call to a name that appears nowhere else
+        with open(str(proj / "sample" / "core" / "store.cpp"), "a", encoding="utf-8") as fh:
+            fh.write("\n// bool Snapshot::ct_only_definition(const Store& from) {\n"
+                     "//     return from.ct_only_callee();\n"
+                     "// }\n")
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        dbs = sorted((proj / ".tools").glob("code_index.*.sqlite"))
+        check("commented-out fixture produced an index", bool(dbs), str(dbs))
+        if dbs:
+            con = _sq3.connect(str(dbs[0]))
+            rows = con.execute("SELECT commented_out FROM symbols "
+                               "WHERE name LIKE '%ct_only_definition%'").fetchall()
+            check("a commented-out DEFINITION is indexed and flagged commented_out=1",
+                  len(rows) == 1 and rows[0][0] == 1, str(rows))
+            n = con.execute("SELECT COUNT(*) FROM refs "
+                            "WHERE symbol='ct_only_callee'").fetchone()[0]
+            check("a call written INSIDE a comment produces no ref at all", n == 0, "refs=%d" % n)
+            live = con.execute("SELECT COUNT(*) FROM symbols WHERE name LIKE "
+                               "'%ct_only_definition%' AND commented_out=0").fetchone()[0]
+            check("and it is NOT counted as a live definition", live == 0, "live=%d" % live)
+            con.close()
 
     # A `files` ROW THAT OUTLIVED ITS SCANNED ROWS MUST NOT MAKE THE FILE INVISIBLE.
     #
