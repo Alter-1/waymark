@@ -359,6 +359,48 @@ documentation.
 **Vendored code is not source either.** Fix it upstream and re-copy, or the fix does not exist for
 anyone else.
 
+### Derive the copies — and keep exactly one witness
+
+**When one fact must appear in several places, write it once and derive the rest.** Not for
+elegance: hand-maintained copies have a half-life, and they fail *silently*. Offsets written out
+beside the struct they describe; a list of field names repeated as struct members, accessor
+functions, JSON keys and parser cases; the same set of ids typed into the code and again into the
+tool that checks the code. Each of those is a divergence with a date on it.
+
+The failures are boringly consistent. A list of slots written by hand skipped one, and the missing
+slot's settings were silently discarded on every save — *for years*. A checking tool walked fifteen
+ids the author had thought of, while the page had fifty-two, and reported IDENTICAL for a page that
+had just grown a new one. A comment beside a constant described a layout the field had moved out of
+a day earlier.
+
+**But if you derive both sides of a check, the check becomes tautological.** This is the part that
+is easy to get wrong while feeling clever. Deriving offsets from a struct removes the drift — and
+also removes the compile-time assertion's ability to object, because now nothing can disagree with
+anything. Keep **one independent statement** as the specification and assert the derived form
+against it. Derive the uses; keep one witness.
+
+**Where derivation is impossible, make the agreement a test.** Two languages, two toolchains, a
+wire format and a parser written by different hands — nothing can generate one from the other. Then
+the agreement is a test or it is a hope, and the test must be one that has been *seen to fail*.
+
+**The diagnostic is countable.** How many places is this name written by hand? If more than one:
+what would notice when they diverge? If the answer is "someone reading carefully", it will diverge.
+
+**And the counter-rules, which matter as much:**
+
+- A generator is code and can be wrong. Mine emitted C preprocessor syntax into a C file the same
+  day I wrote it. Treat its output with the scepticism you would give any other code.
+- Generated artifacts must be checked in or verifiably regenerable — see above; a stale one is a
+  wrong build.
+- Do not generate what one honest list would say more clearly. Three items is a list. Thirty is a
+  generator. The cost of a generator is paid by every future reader.
+
+**A check that answers a narrower question than the one you are asking of it is worse than none,**
+because it comes back green. A diff of a tool's `--help` against its previous build was run after
+every change and reported "unchanged" — correctly. It was read as *nothing regressed*. It was
+equally evidence that *nothing was documented*, and the new feature reached shipping without
+appearing in the help at all. Same output, two readings, and only one of them was ever taken.
+
 ---
 
 ## 9. Recording what you learned
@@ -447,5 +489,7 @@ before believing it failed, and check a result you did get against a value you c
 in the same breath as the action that depends on it — and assert that your edit matched, because a
 replace that finds nothing exits 0. Never let the instrument destroy what it measures. Prove
 delivery at the destination, not that a counter moved. Keep the evidence, especially of failure.
-Record the symptom, the dead ends and the uncertainty. And put the knowledge where the next person
-will actually look — which is not your memory, and not the commit message.
+Write a fact once and derive its copies — but keep one independent witness, or the
+check that compares them has nothing left to disagree with. Record the symptom, the dead ends and
+the uncertainty. And put the knowledge where the next person will actually look — which is not your
+memory, and not the commit message.
