@@ -1951,6 +1951,71 @@ def main():
                 check("rows lost on an UNCHANGED tree are still recovered without --force",
                       after2 == before, f"{victim}: before={before} after={after2}")
 
+    # ---- add_note points a note at the DEFINITION, not at whatever quotes it ------------------
+    #
+    # OBSERVED 130926 on a real tree: four notes were written and THREE landed on the wrong file.
+    # Two were attributed to a python REWRITING SCRIPT that carries the C++ signature it rewrites
+    # as a string literal. guess_file did `git grep -l` over the working tree, kept anything with a
+    # source extension (.py among them) and returned hits[0] - "whatever git listed first".
+    #
+    # The index had the right answer the whole time, and the repository had even EXCLUDED that
+    # directory from its roots. The fallback never saw roots, so the exclusion bought nothing.
+    #
+    # THIS FIXTURE IS OWNED, not borrowed. An earlier test in this file asserted against the
+    # repository's own index and passed while the flag it was checking was corrupt, because the
+    # suite rebuilds that index during its run. These rows exist nowhere else.
+    with tempfile.TemporaryDirectory() as td:
+        import sqlite3 as _s3
+        import types as _types
+        gdb = Path(td) / "code_index.fixture.sqlite"
+        gcon = _s3.connect(str(gdb))
+        gcon.execute("CREATE TABLE symbols(id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
+                     "file TEXT, line INTEGER, signature TEXT, commented_out INTEGER DEFAULT 0, "
+                     "guarded_by TEXT DEFAULT '')")
+        for name, kind, f, ln, dead in [
+            # the real thing, and its declaration in the header
+            ("CFoo::Teardown", "function", "src/foo.cpp", 100, 0),
+            ("CFoo::Teardown", "function", "src/aaa_foo.h", 10, 0),   # sorts BEFORE foo.cpp on purpose
+            # a DIFFERENT class with the same leaf, in a file that sorts FIRST
+            ("CBar::Teardown", "function", "src/bar.cpp", 20, 0),
+            # same leaf again, not a function
+            ("Teardown", "macro", "src/aaa_legacy.h", 5, 0),
+            # a definition that exists only inside a comment
+            ("CDead::Teardown", "function", "src/aaa_dead.cpp", 7, 1),
+        ]:
+            gcon.execute("INSERT INTO symbols(name, kind, file, line, signature, commented_out) "
+                         "VALUES(?,?,?,?,?,?)", (name, kind, f, ln, "", dead))
+        gcon.commit()
+        gcon.close()
+
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("_wm_add_note", TOOLS / "add_note.py")
+        _an = _ilu.module_from_spec(_spec)
+        sys.modules["_wm_add_note"] = _an
+        _spec.loader.exec_module(_an)
+        _an._engine = lambda: _types.SimpleNamespace(default_index_path=lambda ext: gdb)
+
+        check("a note resolves to the IMPLEMENTATION, not the header that declares it",
+              _an._guess_file_from_index("CFoo::Teardown") == "src/foo.cpp",
+              _an._guess_file_from_index("CFoo::Teardown"))
+        # Without the qualified-name branch this returns src/bar.cpp: the leaf matches three rows
+        # and bar.cpp sorts before foo.cpp. That is a note filed against a class nobody asked about.
+        check("a QUALIFIED name is an answer, not a hint",
+              _an._guess_file_from_index("CBar::Teardown") == "src/bar.cpp",
+              _an._guess_file_from_index("CBar::Teardown"))
+        # aaa_legacy.h sorts first and is the only exact match on the bare leaf, so a resolver that
+        # ranks by filename alone picks the macro.
+        check("a function outranks a macro with the same name",
+              _an._guess_file_from_index("Teardown") in ("src/bar.cpp", "src/foo.cpp"),
+              _an._guess_file_from_index("Teardown"))
+        check("a definition that exists only inside a comment is not a home for a note",
+              _an._guess_file_from_index("CDead::Teardown") == "",
+              _an._guess_file_from_index("CDead::Teardown"))
+        # NEVER FAIL, ALWAYS FALL BACK: a repository with no index yet must still get a guess.
+        _an._engine = lambda: _types.SimpleNamespace(
+            default_index_path=lambda ext: Path(td) / "nothing-here.sqlite")
+        check("a missing index degrades to the fallback instead of raising",
+              _an._guess_file_from_index("CFoo::Teardown") == "")
     # THE EXIT CODE MUST SEE EVERY CHECK. There is an `if FAILED: return 1` partway up this
     # function, and roughly 350 lines of tests run AFTER it - the html lexer, the js vars,
     # dangling-refs, and everything above. A failure in any of those printed FAIL and then fell
