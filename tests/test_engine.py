@@ -13,6 +13,7 @@ Standard library only, no test framework, exit code 1 on failure.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1470,9 +1471,19 @@ def main():
               ".cs was indexed without being configured")
 
     print()
+    # _AT_ 130926  DO NOT RETURN HERE. This used to be `if FAILED: return 1`, which stopped the run
+    # dead on the first failure - and roughly 460 lines of cases live below it. The consequence is
+    # not just missing signal: it makes every later case UNFALSIFIABLE, because a negative control
+    # that breaks the engine trips an earlier case and the run never reaches the case under test.
+    # Observed while adding the commented-out cases below: the engine was deliberately broken, an
+    # earlier HTML case failed as it should, the suite returned at this line, and the new cases were
+    # reported neither pass nor fail - which reads exactly like "my test does not work".
+    #
+    # The comment near the end of this function already describes the mirror of this problem (FAILs
+    # printed, then "all passed", exit 0) and fixed it THERE. This is the other half. The summary
+    # and the exit code are both at the end now; nothing in between should short-circuit them.
     if FAILED:
-        print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
-        return 1
+        print(f"   ({len(FAILED)} failure(s) so far: " + ", ".join(FAILED) + ") - continuing")
     # A DEFINITION SPLIT OVER TWO LINES -- the return type on its own line, the name on the next.
     # lwIP and BSD-derived C are written this way throughout, and the single-line matcher saw none
     # of it: netif.c yielded 27 symbols (macros and parameters) instead of its ~30 functions, while
@@ -1817,6 +1828,194 @@ def main():
         check("a definition that only gained its class prefix is not 'deleted'",
               "ratio" not in out, out[:300])
 
+    # COMMENTED-OUT CODE MUST BE DISTINGUISHABLE FROM LIVE CODE, IN BOTH DIRECTIONS.
+    #
+    # Some houses replace code by commenting the old version out rather than deleting it, so a
+    # rejected approach stays visible where the next person would be tempted to retry it. Where
+    # that is the convention the density of commented-out code is high, and an indexer that cannot
+    # tell it from live code is actively misleading: it reports definitions that do not exist and
+    # call sites that never run.
+    #
+    # WHAT WAS AND WAS NOT ALREADY COVERED, checked rather than assumed. `commented_out` on a
+    # DEFINITION was already tested - "markup inside <!-- --> is NOT live" above - and that case
+    # duly failed when the flag was deliberately inverted. What had NO coverage at all was the
+    # other half: that a call written inside a comment produces no row in `refs`. Everything built
+    # on `refs` - a call graph, a "what reaches this teardown" query - depends on it, and would
+    # start inventing edges with no signal whatever if it regressed. These cases add the C++
+    # definition shape and, more importantly, that missing half.
+    #
+    # HOW FAR EACH OF THESE IS PROVEN, stated plainly rather than assumed. The two DEFINITION
+    # cases are falsifiable and were verified failing: inverting the commented_out argument in
+    # index_code.py makes both report FAIL with their detail ([(0,)] and live=1). The REF case was
+    # NOT verified failing - two attempts to break the comment filter did not reach the code path
+    # the test exercises, because `code_lines` comes from a cache populated elsewhere and the
+    # uncached branch never runs here. So treat it as a lock on current behaviour rather than as a
+    # proven detector, and if you change ref scanning, break it deliberately and check this case
+    # actually moves.
+    #
+    # BUILT IN A TEMP TREE ON PURPOSE. The first version of this case asserted against the
+    # repository's own index and passed even when the flag was deliberately corrupted first - the
+    # suite rebuilds that index during its own run, so the planted fault was overwritten before the
+    # assertion. A test that cannot fail is not a test; this one owns its input.
+    with tempfile.TemporaryDirectory() as td:
+        import sqlite3 as _sq3
+        proj = Path(td) / "p"
+        shutil.copytree(ROOT, proj, ignore=shutil.ignore_patterns(
+            ".git", "*.sqlite", "*.json.bak*", "__pycache__"))
+        # a commented-out DEFINITION, and inside it a call to a name that appears nowhere else
+        with open(str(proj / "sample" / "core" / "store.cpp"), "a", encoding="utf-8") as fh:
+            fh.write("\n// bool Snapshot::ct_only_definition(const Store& from) {\n"
+                     "//     return from.ct_only_callee();\n"
+                     "// }\n")
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        dbs = sorted((proj / ".tools").glob("code_index.*.sqlite"))
+        check("commented-out fixture produced an index", bool(dbs), str(dbs))
+        if dbs:
+            con = _sq3.connect(str(dbs[0]))
+            rows = con.execute("SELECT commented_out FROM symbols "
+                               "WHERE name LIKE '%ct_only_definition%'").fetchall()
+            check("a commented-out DEFINITION is indexed and flagged commented_out=1",
+                  len(rows) == 1 and rows[0][0] == 1, str(rows))
+            n = con.execute("SELECT COUNT(*) FROM refs "
+                            "WHERE symbol='ct_only_callee'").fetchone()[0]
+            check("a call written INSIDE a comment produces no ref at all", n == 0, "refs=%d" % n)
+            live = con.execute("SELECT COUNT(*) FROM symbols WHERE name LIKE "
+                               "'%ct_only_definition%' AND commented_out=0").fetchone()[0]
+            check("and it is NOT counted as a live definition", live == 0, "live=%d" % live)
+            con.close()
+
+    # A `files` ROW THAT OUTLIVED ITS SCANNED ROWS MUST NOT MAKE THE FILE INVISIBLE.
+    #
+    # The incremental plan compared size+mtime against the `files` table and nothing else, so a file
+    # whose rows had gone - an interrupted run, a crash, a lock - still looked "unchanged" and was
+    # never rescanned. Silent and permanent: no query reported it, and only --force recovered it.
+    # Found 100926 on a real index, where two IP_SDK_Wrapper files present on disk, in git and in
+    # the .csproj had silently dropped out.
+    with tempfile.TemporaryDirectory() as td:
+        import sqlite3 as _sq
+        proj = Path(td) / "p"
+        shutil.copytree(ROOT, proj, ignore=shutil.ignore_patterns(
+            ".git", "*.sqlite", "*.json.bak*", "__pycache__"))
+        run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+        dbs = sorted(Path(proj / ".tools").glob("code_index.*.sqlite"))
+        check("incremental fixture built an index", bool(dbs), str(dbs))
+        if dbs:
+            con = _sq.connect(str(dbs[0]))
+            row = con.execute("SELECT file, COUNT(*) FROM symbols GROUP BY file "
+                              "ORDER BY COUNT(*) DESC LIMIT 1").fetchone()
+            check("fixture has a file with symbols to strip", bool(row), str(row))
+            if row:
+                victim, before = row
+                # Strip ONLY the scanned rows; leave the files row, so size+mtime still match.
+                for t in ("symbols", "symbol_comments", "architecture_comments",
+                          "refs", "constants", "api_markers"):
+                    try:
+                        con.execute(f"DELETE FROM {t} WHERE file = ?", (victim,))
+                    except _sq.Error:
+                        pass
+                con.commit()
+                gone = con.execute("SELECT COUNT(*) FROM symbols WHERE file = ?",
+                                   (victim,)).fetchone()[0]
+                check("negative control: the rows really were removed", gone == 0, f"{gone}")
+                con.close()
+                # A PLAIN incremental run - not --force - must put them back.
+                run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+                con = _sq.connect(str(dbs[0]))
+                after = con.execute("SELECT COUNT(*) FROM symbols WHERE file = ?",
+                                    (victim,)).fetchone()[0]
+                con.close()
+                check("a file whose scanned rows vanished is re-indexed without --force",
+                      after == before, f"{victim}: before={before} after={after}")
+
+                # AND AGAIN WITH THE TREE COMPLETELY UNCHANGED. The first version of this fix lived
+                # only in plan_incremental, and index_is_fresh returns before that is ever reached -
+                # so on a real repository, where nothing had been touched, the damaged file stayed
+                # lost and every run printed "cached" and exited 0. This case is the one that
+                # caught it: no copy, no touch, nothing to change a digest.
+                con = _sq.connect(str(dbs[0]))
+                for t in ("symbols", "symbol_comments", "architecture_comments",
+                          "refs", "constants", "api_markers"):
+                    try:
+                        con.execute(f"DELETE FROM {t} WHERE file = ?", (victim,))
+                    except _sq.Error:
+                        pass
+                con.commit()
+                con.close()
+                rc, out, _ = run([str(proj / ".tools" / "index_code.py")], cwd=proj)
+                check("the build does not report 'cached' when rows were lost",
+                      '"cached": true' not in out.lower().replace(" ", ""), out[:200])
+                con = _sq.connect(str(dbs[0]))
+                after2 = con.execute("SELECT COUNT(*) FROM symbols WHERE file = ?",
+                                     (victim,)).fetchone()[0]
+                con.close()
+                check("rows lost on an UNCHANGED tree are still recovered without --force",
+                      after2 == before, f"{victim}: before={before} after={after2}")
+
+    # ---- add_note points a note at the DEFINITION, not at whatever quotes it ------------------
+    #
+    # OBSERVED 130926 on a real tree: four notes were written and THREE landed on the wrong file.
+    # Two were attributed to a python REWRITING SCRIPT that carries the C++ signature it rewrites
+    # as a string literal. guess_file did `git grep -l` over the working tree, kept anything with a
+    # source extension (.py among them) and returned hits[0] - "whatever git listed first".
+    #
+    # The index had the right answer the whole time, and the repository had even EXCLUDED that
+    # directory from its roots. The fallback never saw roots, so the exclusion bought nothing.
+    #
+    # THIS FIXTURE IS OWNED, not borrowed. An earlier test in this file asserted against the
+    # repository's own index and passed while the flag it was checking was corrupt, because the
+    # suite rebuilds that index during its run. These rows exist nowhere else.
+    with tempfile.TemporaryDirectory() as td:
+        import sqlite3 as _s3
+        import types as _types
+        gdb = Path(td) / "code_index.fixture.sqlite"
+        gcon = _s3.connect(str(gdb))
+        gcon.execute("CREATE TABLE symbols(id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
+                     "file TEXT, line INTEGER, signature TEXT, commented_out INTEGER DEFAULT 0, "
+                     "guarded_by TEXT DEFAULT '')")
+        for name, kind, f, ln, dead in [
+            # the real thing, and its declaration in the header
+            ("CFoo::Teardown", "function", "src/foo.cpp", 100, 0),
+            ("CFoo::Teardown", "function", "src/aaa_foo.h", 10, 0),   # sorts BEFORE foo.cpp on purpose
+            # a DIFFERENT class with the same leaf, in a file that sorts FIRST
+            ("CBar::Teardown", "function", "src/bar.cpp", 20, 0),
+            # same leaf again, not a function
+            ("Teardown", "macro", "src/aaa_legacy.h", 5, 0),
+            # a definition that exists only inside a comment
+            ("CDead::Teardown", "function", "src/aaa_dead.cpp", 7, 1),
+        ]:
+            gcon.execute("INSERT INTO symbols(name, kind, file, line, signature, commented_out) "
+                         "VALUES(?,?,?,?,?,?)", (name, kind, f, ln, "", dead))
+        gcon.commit()
+        gcon.close()
+
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("_wm_add_note", TOOLS / "add_note.py")
+        _an = _ilu.module_from_spec(_spec)
+        sys.modules["_wm_add_note"] = _an
+        _spec.loader.exec_module(_an)
+        _an._engine = lambda: _types.SimpleNamespace(default_index_path=lambda ext: gdb)
+
+        check("a note resolves to the IMPLEMENTATION, not the header that declares it",
+              _an._guess_file_from_index("CFoo::Teardown") == "src/foo.cpp",
+              _an._guess_file_from_index("CFoo::Teardown"))
+        # Without the qualified-name branch this returns src/bar.cpp: the leaf matches three rows
+        # and bar.cpp sorts before foo.cpp. That is a note filed against a class nobody asked about.
+        check("a QUALIFIED name is an answer, not a hint",
+              _an._guess_file_from_index("CBar::Teardown") == "src/bar.cpp",
+              _an._guess_file_from_index("CBar::Teardown"))
+        # aaa_legacy.h sorts first and is the only exact match on the bare leaf, so a resolver that
+        # ranks by filename alone picks the macro.
+        check("a function outranks a macro with the same name",
+              _an._guess_file_from_index("Teardown") in ("src/bar.cpp", "src/foo.cpp"),
+              _an._guess_file_from_index("Teardown"))
+        check("a definition that exists only inside a comment is not a home for a note",
+              _an._guess_file_from_index("CDead::Teardown") == "",
+              _an._guess_file_from_index("CDead::Teardown"))
+        # NEVER FAIL, ALWAYS FALL BACK: a repository with no index yet must still get a guess.
+        _an._engine = lambda: _types.SimpleNamespace(
+            default_index_path=lambda ext: Path(td) / "nothing-here.sqlite")
+        check("a missing index degrades to the fallback instead of raising",
+              _an._guess_file_from_index("CFoo::Teardown") == "")
     # THE EXIT CODE MUST SEE EVERY CHECK. There is an `if FAILED: return 1` partway up this
     # function, and roughly 350 lines of tests run AFTER it - the html lexer, the js vars,
     # dangling-refs, and everything above. A failure in any of those printed FAIL and then fell

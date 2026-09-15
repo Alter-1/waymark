@@ -154,6 +154,18 @@ Notes live in `Docs/source_index_annotations.json`, which is the source of truth
 build product and is regenerated with `index_code.py`. **Keyword entries on the SYMPTOM, not the
 cause** — a year later you will search for "writes disappear", not for "compaction snapshot".
 
+> **`annotation` and `concept` match ONE SUBSTRING, not a set of keywords.** Both are a single
+> `LIKE %term%` over the entry's id, name, symbols and body. So a query written as loose keywords
+> returns `No matches` for an entry that is certainly there, and that output is indistinguishable
+> from the entry not existing. Observed 10-09-2026: a concept named
+> *"Reading branch_audit output …"* was reported missing by `concept "branch audit output"` minutes
+> after it was written and indexed — the name has an underscore, `branch_audit`.
+>
+> **`No matches` is not evidence of absence.** Query a distinctive phrase you know is in the text,
+> or list the table, before concluding anything is missing. This matters most in exactly the
+> situation the KB exists for: you are checking whether something was already recorded, and a false
+> "nothing here" sends you off to re-derive it, or worse, to re-implement it.
+
 Each entry carries a short `brief` for triage and a long `notes` for the evidence. Compact output
 prefers the `brief`; `--full` gives you everything.
 

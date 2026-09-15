@@ -27,6 +27,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import time
 import sys
@@ -157,12 +158,90 @@ def annotation_path() -> Path:
     return path if path.is_absolute() else (REPO_ROOT / path)
 
 
+def _guess_file_from_index(symbol: str) -> str:
+    """The symbol's definition site as the INDEX records it.
+
+    Asked FIRST, because the index is the only source here that has actually parsed the tree. It
+    knows a definition from a mention, it knows a commented-out definition from a live one, and it
+    honours the `roots` in kb.config.json. The git-grep fallback below knows none of that: it
+    searches the whole working tree and matches text.
+
+    THE BUG THIS FIXES, observed 130926 in a consuming repository. Four notes were written and
+    THREE landed on the wrong file. Two were attributed to a PYTHON REWRITING SCRIPT that carries
+    the C++ signature it rewrites as a string literal:
+
+        H_ANCHOR = "\tHRESULT CameraFinalizeConnection(BOOL bExtended = FALSE);"
+
+    git grep matched the literal, .py is in SOURCE_EXTS, and hits[0] took whatever git listed
+    first. That repository keeps such scripts in a directory its kb.config.json DELIBERATELY
+    excludes from the index - so the index had the right answer all along and the fallback, which
+    never sees roots, overrode it. Generalised: anything that quotes source (a rewriting script, a
+    test fixture, a design document) outranks the real definition whenever git happens to list it
+    first, and "quotes source" is exactly what the index exists to tell apart from "defines".
+
+    The DB is NAMED, never globbed: sorted(glob("code_index*.sqlite"))[0] picks whatever sorts
+    first, which once made a test accuse the engine of corrupting a database it had never touched.
+    """
+    try:
+        engine = _engine()
+        db = engine.default_index_path("sqlite")
+        if not db.exists():
+            return ""
+        con = sqlite3.connect(str(db))
+    except Exception:
+        return ""                      # no index yet, or an older engine - fall back, never fail
+    try:
+        leaf = symbol.rsplit("::", 1)[-1]
+        # A QUALIFIED NAME IS AN ANSWER, NOT A HINT. Where three unrelated classes define
+        # StopMonitor, resolving CCardCommand::StopMonitor by its leaf picks whichever file sorts
+        # first and attributes the note to a class the reader never asked about.
+        rows = []
+        if "::" in symbol:
+            rows = con.execute(
+                "SELECT file, kind, line FROM symbols WHERE name = ? AND commented_out = 0",
+                (symbol,),
+            ).fetchall()
+        if not rows and "::" in symbol:
+            # KNOWN BUT NOT LIVE IS AN ANSWER TOO. If the index has heard of this exact name and
+            # every definition of it is commented out, the honest result is "no home" - falling
+            # through to the leaf would answer a question about CDead with a file about CBar.
+            known = con.execute("SELECT 1 FROM symbols WHERE name = ? LIMIT 1",
+                                (symbol,)).fetchone()
+            if known:
+                return ""
+        if not rows:
+            rows = con.execute(
+                "SELECT file, kind, line FROM symbols "
+                "WHERE (name = ? OR name LIKE ?) AND commented_out = 0",
+                (leaf, "%::" + leaf),
+            ).fetchall()
+    except Exception:
+        return ""
+    finally:
+        con.close()
+    if not rows:
+        return ""
+
+    # Deterministic, and stated rather than incidental: a real function beats a macro or a typedef,
+    # and an implementation file beats the header that only declares it - the note is about what
+    # the code DOES. Ties break on (file, line) so two runs never disagree.
+    IMPL = (".cpp", ".c", ".cc", ".cs")
+    rows.sort(key=lambda r: (r[1] != "function",
+                             not str(r[0]).endswith(IMPL),
+                             str(r[0]), r[2]))
+    return str(rows[0][0])
+
+
 def guess_file(symbol: str) -> str:
     """Best-effort home for the symbol, so the note sits next to the code it constrains.
 
     A wrong guess is cheap - the note is still found by name and keyword - so this stays quiet
     rather than failing when the repository is not a git checkout or the symbol is a concept.
     """
+    where = _guess_file_from_index(symbol)
+    if where:
+        return where
+
     leaf = symbol.rsplit("::", 1)[-1]
     try:
         proc = subprocess.run(
@@ -175,7 +254,13 @@ def guess_file(symbol: str) -> str:
     # Source only: the annotation file itself quotes symbol names, so an unfiltered match points
     # the note at the KB rather than at the code.
     hits = [h for h in hits if h.endswith(SOURCE_EXTS)]
-    return hits[0] if hits else ""
+    # Reached only when the index has nothing, so roots cannot help here - but "whatever git listed
+    # first" is still the wrong tie-break. Prefer an implementation file, and be deterministic.
+    if not hits:
+        return ""
+    IMPL = (".cpp", ".c", ".cc", ".cs")
+    hits.sort(key=lambda h: (not h.endswith(IMPL), h))
+    return hits[0]
 
 
 def _engine():

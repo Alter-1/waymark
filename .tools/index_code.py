@@ -443,13 +443,58 @@ def carry_persistent_tables(old_db, con) -> str:
     return out
 
 
-def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_digest: str) -> bool:
+def orphan_file_count(con: sqlite3.Connection) -> int:
+    """How many `files` rows have no row in ANY scanned table.
+
+    A stable number is normal - a header of pure #defines, a XAML file, a C# DTO of auto-properties
+    all legitimately yield nothing. A number that has GONE UP since the last build means rows were
+    lost without the file changing, which is the damaged state described on index_is_fresh below.
+    """
+    usable = []
+    for table in SCANNED_TABLES:
+        try:
+            cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+        except sqlite3.Error:
+            continue
+        if "file" in cols:
+            usable.append(table)
+    if not usable:
+        return 0
+    union = " UNION ".join(f"SELECT file FROM {t}" for t in usable)
     try:
-        return (
+        return con.execute(f"SELECT COUNT(*) FROM files WHERE path NOT IN ({union})").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+
+
+def index_is_fresh(con: sqlite3.Connection, source_digest: str, annotation_digest: str) -> bool:
+    """Can this build be skipped entirely?
+
+    THE DIGESTS ONLY DESCRIBE THE SOURCE. They say nothing about whether the INDEX still holds what
+    the last build put there, so a database that has lost rows without the tree changing is
+    "fresh" for ever: the build short-circuits here, plan_incremental is never reached, and the
+    per-file recovery there never gets a chance to run. Only --force escapes, and nobody runs
+    --force because nothing looks wrong.
+
+    Measured 100926 on a real index: two sources present on disk, in git and in the .csproj had no
+    rows at all, and every plain run reported "cached" and exited 0. Fixing plan_incremental alone
+    did NOT help them, precisely because this gate returns first - the accompanying test only passed
+    because copying the fixture changed the digest and so bypassed this.
+
+    So freshness now also requires the orphan count to be unchanged. A project with a stable set of
+    genuinely empty files stays cached; one that has just lost rows does not.
+    """
+    try:
+        if not (
             meta_value(con, "index_schema") == INDEX_SCHEMA_VERSION
             and meta_value(con, "source_digest") == source_digest
             and meta_value(con, "annotation_digest") == annotation_digest
-        )
+        ):
+            return False
+        # Absent on databases built before this check existed: treat as "unknown", rebuild once,
+        # and it is recorded from then on. Self-healing, no schema version bump.
+        recorded = meta_value(con, "orphan_files")
+        return recorded is not None and recorded == str(orphan_file_count(con))
     except sqlite3.Error:
         return False
 
@@ -497,6 +542,32 @@ def stored_file_state(con: sqlite3.Connection) -> dict:
         return {}
 
 
+def files_missing_scanned_rows(con: sqlite3.Connection, on_disk: set) -> set:
+    """Paths recorded in `files` that have no row in ANY scanned table, and still exist on disk.
+
+    Only tables that actually carry a `file` column are consulted, so a schema that grows a scanned
+    table keyed differently cannot make this raise. A table that is missing entirely is skipped for
+    the same reason - this runs on every incremental build and must never be the thing that breaks
+    one.
+    """
+    usable = []
+    for table in SCANNED_TABLES:
+        try:
+            cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+        except sqlite3.Error:
+            continue
+        if "file" in cols:
+            usable.append(table)
+    if not usable:
+        return set()
+    union = " UNION ".join(f"SELECT file FROM {t}" for t in usable)
+    try:
+        rows = con.execute(f"SELECT path FROM files WHERE path NOT IN ({union})")
+        return {r[0] for r in rows if r[0] in on_disk}
+    except sqlite3.Error:
+        return set()
+
+
 def plan_incremental(con: sqlite3.Connection, files: list) -> tuple | None:
     """(rescan, gone) for an incremental build, or None if this one has to be done in full.
 
@@ -522,6 +593,22 @@ def plan_incremental(con: sqlite3.Connection, files: list) -> tuple | None:
             continue
         current[rel(path)] = (st.st_size, st.st_mtime_ns)
     rescan = sorted(p for p, v in current.items() if stored.get(p) != v)
+    # A FILE ROW THAT OUTLIVED ITS SCANNED ROWS IS INVISIBLE FOR EVER.
+    #
+    # size+mtime still match, so the file is never rescanned; nothing counts it as missing, because
+    # `files` says it is up to date. The only way out was --force, which nobody runs because nothing
+    # reports a problem. Any interruption between forget_files() and the inserts leaves this state -
+    # Ctrl-C, a crash, a full disk, an antivirus lock - and it is silent and permanent.
+    #
+    # Found 100926 on a real index: IP_SDK_Wrapper/ASTM422AnalizerResult.cs and DWAnalizerResult.cs
+    # were present on disk, in git and in the .csproj, and had been indexed an hour earlier in
+    # another database, yet every incremental run left them out. --force recovered them. Reproduced
+    # deliberately by deleting a file's symbols rows while keeping its `files` row: the next normal
+    # run did NOT restore them.
+    #
+    # Cost of the check, measured on that index: 2 files of 423 (0.5%) genuinely have no rows in any
+    # scanned table, so they rescan every run. That is the entire price of never losing a file again.
+    rescan = sorted(set(rescan) | files_missing_scanned_rows(con, set(current)))
     gone = sorted(p for p in stored if p not in current)
     return rescan, gone
 
@@ -3333,6 +3420,11 @@ def main() -> int:
     con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("index_schema", INDEX_SCHEMA_VERSION))
     con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("source_digest", source_digest))
     con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)", ("annotation_digest", annotation_digest))
+    # Recorded AFTER the scan, so it describes what this build actually left behind. index_is_fresh
+    # compares it on the next run: an orphan count that has grown means rows were lost without the
+    # tree changing, and the build must not report "cached".      -- 100926
+    con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                ("orphan_files", str(orphan_file_count(con))))
     con.commit()
 
     stats = current_stats(con)
