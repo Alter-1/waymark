@@ -1982,6 +1982,14 @@ def main():
             ("Teardown", "macro", "src/aaa_legacy.h", 5, 0),
             # a definition that exists only inside a comment
             ("CDead::Teardown", "function", "src/aaa_dead.cpp", 7, 1),
+            # THE LIKE-WILDCARD PAIR. `_` matches any single character in LIKE, so an unescaped
+            # `read_all` also matches `CWild::readXall` -- and aaa_wild.cpp sorts FIRST, so the
+            # wrong one does not merely match, it wins.
+            ("CWild::readXall", "function", "src/aaa_wild.cpp", 30, 0),
+            ("CReal::read_all",  "function", "src/real.cpp",     40, 0),
+            # INDEXED BUT GONE FROM THE TREE: the only definition of this one, and its file is
+            # deliberately never created below.
+            ("CMoved::Vanished", "function", "src/moved_away.cpp", 50, 0),
         ]:
             gcon.execute("INSERT INTO symbols(name, kind, file, line, signature, commented_out) "
                          "VALUES(?,?,?,?,?,?)", (name, kind, f, ln, "", dead))
@@ -1994,6 +2002,16 @@ def main():
         sys.modules["_wm_add_note"] = _an
         _spec.loader.exec_module(_an)
         _an._engine = lambda: _types.SimpleNamespace(default_index_path=lambda ext: gdb)
+        # THE FIXTURE OWNS ITS TREE TOO, not just its rows. _guess_file_from_index refuses a row
+        # whose file has gone, so the files these rows name have to exist somewhere -- and pointing
+        # REPO_ROOT at the real repository would make the check pass for the wrong reason (none of
+        # these paths exist there either). src/moved_away.cpp is left OUT on purpose.
+        _an.REPO_ROOT = Path(td)
+        for _f in ("src/foo.cpp", "src/aaa_foo.h", "src/bar.cpp", "src/aaa_legacy.h",
+                   "src/aaa_dead.cpp", "src/aaa_wild.cpp", "src/real.cpp"):
+            _p = Path(td) / _f
+            _p.parent.mkdir(parents=True, exist_ok=True)
+            _p.write_text("// fixture\n", encoding="utf-8")
 
         check("a note resolves to the IMPLEMENTATION, not the header that declares it",
               _an._guess_file_from_index("CFoo::Teardown") == "src/foo.cpp",
@@ -2011,6 +2029,18 @@ def main():
         check("a definition that exists only inside a comment is not a home for a note",
               _an._guess_file_from_index("CDead::Teardown") == "",
               _an._guess_file_from_index("CDead::Teardown"))
+        # Without ESCAPE this returns src/aaa_wild.cpp: `read_all` matches CWild::readXall through
+        # the `_` wildcard and that file sorts first. A note about one function, filed against
+        # another. Reported in review, reproduced on a two-row index before the fix.
+        check("an underscore in the leaf is a character, not a wildcard",
+              _an._guess_file_from_index("read_all") == "src/real.cpp",
+              _an._guess_file_from_index("read_all"))
+        # The index is a cache. Answering from a row whose file has been renamed or deleted files
+        # the note against a path that is not there, and -- because guess_file() takes any non-empty
+        # answer -- the git-grep fallback that searches the CURRENT tree never runs.
+        check("a row whose file has gone from the tree is not an answer",
+              _an._guess_file_from_index("CMoved::Vanished") == "",
+              _an._guess_file_from_index("CMoved::Vanished"))
         # NEVER FAIL, ALWAYS FALL BACK: a repository with no index yet must still get a guess.
         _an._engine = lambda: _types.SimpleNamespace(
             default_index_path=lambda ext: Path(td) / "nothing-here.sqlite")

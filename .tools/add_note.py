@@ -210,15 +210,32 @@ def _guess_file_from_index(symbol: str) -> str:
             if known:
                 return ""
         if not rows:
+            # ESCAPE THE LEAF BEFORE IT BECOMES A PATTERN. `_` matches ANY single character in LIKE
+            # and C/C++ identifiers are full of them, so an unescaped `foo_bar` also matches
+            # `C::fooXbar`. It is not a near miss: on a two-row index the wrong symbol's file sorted
+            # first and won outright, so the note was filed against a function the author never
+            # mentioned. index_code.py already escapes where it resolves a bare name to a tail
+            # (`name LIKE ? ESCAPE '\\'`); this query was the one that did not.
+            like_leaf = leaf.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             rows = con.execute(
                 "SELECT file, kind, line FROM symbols "
-                "WHERE (name = ? OR name LIKE ?) AND commented_out = 0",
-                (leaf, "%::" + leaf),
+                "WHERE (name = ? OR name LIKE ? ESCAPE '\\') AND commented_out = 0",
+                (leaf, "%::" + like_leaf),
             ).fetchall()
     except Exception:
         return ""
     finally:
         con.close()
+    if not rows:
+        return ""
+
+    # THE INDEX IS A CACHE, AND IT CAN BE OLDER THAN THE TREE. A file renamed, moved or deleted
+    # since the last build is still in it, and answering with that path files the note against a
+    # path that is not there any more -- while the git-grep fallback, which searches the CURRENT
+    # tree and would have found the new location, is never reached, because guess_file() takes any
+    # non-empty answer. A row whose file has gone is therefore not an answer. Filtering rather than
+    # checking only the winner: several definitions may be indexed and only one of them moved.
+    rows = [r for r in rows if (REPO_ROOT / str(r[0])).exists()]
     if not rows:
         return ""
 

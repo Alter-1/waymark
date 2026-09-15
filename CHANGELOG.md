@@ -5,6 +5,30 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-15
+
+### Fixed
+* **A note could still be filed against the wrong file, two ways** — both found in review of the
+  change that was supposed to end exactly that, which is the useful part: resolving through the
+  index removed the loud failure and left two quiet ones.
+
+  **An underscore in a symbol name was a wildcard.** The leaf lookup used
+  `name LIKE '%::' || leaf` with no `ESCAPE`, and `_` matches any single character in SQL `LIKE`.
+  C and C++ identifiers are full of underscores, so `read_all` also matched `CWild::readXall` —
+  and it is not a near miss that loses a tie-break: on a two-row index the wrong symbol's file
+  sorted first and won outright. `index_code.py` had escaped its equivalent lookup all along; this
+  one had not.
+
+  **A stale index answered for a file that no longer exists.** The index is a cache, so a file
+  renamed or deleted since the last build is still in it. `guess_file()` takes any non-empty answer
+  from the index, so such a row shadowed the git-grep fallback — the one thing that searches the
+  CURRENT tree and would have found the new location. Rows whose file has gone are now filtered
+  out, all of them rather than just the winner, since several definitions may be indexed and only
+  one may have moved.
+
+  The `comment:` and `arch:` link lookups still use unescaped `%term%`, deliberately: those are
+  substring searches by design, not identifier resolution.
+
 ## 2026-09-10 (later)
 
 ### Added
