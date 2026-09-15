@@ -38,6 +38,27 @@ waits.*
 
 ---
 
+### When the argument is about what the thing SHOULD be, the spec is the authority
+
+Debugging has a fact of the matter you can measure. Design does not: the question "should this be
+one field or two?" has no instrument, so the authority is whatever was written down and agreed. If a
+design document exists, **read it before disputing the design** — including, especially, when you
+believe you already know what it says.
+
+Arguing from memory of a spec feels like arguing from the spec and is not. What it actually
+produces is a rediscovery: you reason your way to a decision that was taken months ago, minus the
+reasons, and the person who wrote it has to walk you back. That is expensive in a way ordinary
+error is not, because every step of it looks like progress.
+
+**A spec that contradicts itself is worse than one that is silent**, and long documents acquire that
+by accretion: a later section written to settle one question quietly overturns an earlier one that
+settled a broader one. Nothing warns you — both read as decided. So when you add a section that
+supersedes an earlier decision, reconcile the two THEN, in the document, or you have created the
+trap yourself. And when you find such a pair, fix the document rather than only the code: **withdraw
+the wrong section in place**, saying what was wrong and why, because the next reader will otherwise
+follow exactly the path you did.
+
+
 ## 2. Making the change
 
 **Ask whether the fix removes the root or hides it.** A green test can mean the defect is gone — or
@@ -154,6 +175,35 @@ how a partial sync gets believed to be complete.
 
 ---
 
+### Verify the artefact the reader gets, not the source that produces it
+
+For anything a person looks at — a rendered page, a generated document, a report — the source is
+evidence about the artefact, not the artefact. They diverge for ordinary reasons: a template is
+cached, a build step is stale, a value is filled at run time, a rule you did not know about decides
+what is visible.
+
+The cost of the substitution is that you can be confidently, repeatedly wrong while reading the
+right file. **Inspect the output**: render it, fetch it from the thing that serves it, read the
+panel back. It is usually seconds, and it answers the question actually asked ("is it there?")
+rather than an adjacent one ("did I write it?").
+
+The tell that you have made this mistake is a reviewer describing something you cannot see. If they
+say a control is missing and your source contains it, stop editing and go look at theirs — one of
+you is reading a different artefact, and it is cheaper to find out which than to argue.
+
+### The comment is not the code, and neither is the name
+
+Checking an ordering, a contract or an invariant by reading the prose that describes it verifies the
+prose. If the two have drifted, the comment is the half that cannot fail a test, so it is the half
+more likely to be wrong — and a confident comment is the most effective way to stop yourself
+looking at the lines underneath it.
+
+This is worse when you wrote the comment. Re-reading your own description of what the code does
+returns what you intended, not what you typed. Read the ORDER, the actual sequence of statements;
+read the field, not its name. A comment saying "checked before X" is a claim about line numbers, and
+line numbers are cheap to verify and easy to assume.
+
+
 ## 4. Silent success is the worst failure mode
 
 The failures that cost the most are the ones that look like answers.
@@ -267,6 +317,25 @@ only keep its edges visible and keep a second source in play. A procedure that p
 here would be the same overconfidence wearing a new costume.
 
 ---
+
+### A refusal that leaves the refused value in force is not a refusal
+
+Validation that rejects an input must also undo it. It is easy to write the check at the point where
+the decision is made — a save, a commit, an apply — by which time the input has usually already been
+written somewhere: a live config, an in-memory object, a staged file. Returning early there rejects
+the *persistence* and keeps the *effect*.
+
+What the operator then sees is the worst available combination: a log line saying it was refused, a
+running system that is using it anyway, and a read-back that agrees with the system rather than the
+log. Each of those is individually true and the set is incoherent — and the two that are easiest to
+look at are the two that say it worked.
+
+So a rejection has three parts, not one: refuse, **restore the state you refused**, and say so
+somewhere the person will look. Re-reading the stored version is usually the cheapest restore and
+has the advantage of being obviously correct. And prefer refusing to choosing: when two explicit
+instructions conflict, silently dropping one of them is the program deciding which of the operator's
+statements it liked better.
+
 
 ## 5. Git, especially in a tree someone else is using
 
@@ -482,12 +551,16 @@ of it could ever reach them.
 
 ## The shortest version
 
-Verify before you fix. Explain before you edit. Make absence loud. Do not ask whether your
+Verify before you fix. Explain before you edit. Read the spec before you dispute the design, and
+reconcile a spec that argues with itself instead of routing around it. Look at the artefact the
+reader gets, not the source that makes it. Read the order, not the comment describing the order.
+Make absence loud. Do not ask whether your
 instrument works — ask what the world says should be there, and whether the instrument would have
 told you if it were not. Prove a search can succeed
 before believing it failed, and check a result you did get against a value you chose. Assert state
 in the same breath as the action that depends on it — and assert that your edit matched, because a
-replace that finds nothing exits 0. Never let the instrument destroy what it measures. Prove
+replace that finds nothing exits 0. Never let the instrument destroy what it measures. A rejection that leaves the rejected value in
+force is not a rejection: refuse, restore, and say so. Prove
 delivery at the destination, not that a counter moved. Keep the evidence, especially of failure.
 Write a fact once and derive its copies — but keep one independent witness, or the
 check that compares them has nothing left to disagree with. Record the symptom, the dead ends and

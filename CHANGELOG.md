@@ -5,6 +5,34 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-15 (later)
+
+### Changed
+* **Four rules in `Docs/BEST-PRACTICE.md`**, each one earned the expensive way in a single day's
+  work on a firmware UI and its design document.
+
+  **The spec is the authority when the argument is about what the thing should be.** Debugging has
+  an instrument; design does not. Arguing from memory of a spec feels identical to arguing from the
+  spec, and what it produces is a rediscovery of a decision taken months earlier, minus its reasons.
+  With the corollary that a document acquires self-contradiction by accretion — a later section
+  quietly overturning an earlier, broader one — so a superseding section must reconcile the two
+  *then*, and a wrong one is withdrawn in place rather than silently worked around in code.
+
+  **Verify the artefact the reader gets, not the source that produces it.** For anything a person
+  looks at, the source is evidence about the artefact and not the artefact; they diverge through
+  caching, stale build steps, run-time fill-in and visibility rules. The tell is a reviewer
+  describing something you cannot see.
+
+  **The comment is not the code, and neither is the name.** Checking an ordering by reading the
+  prose that describes it verifies the prose — and the comment is the half that cannot fail a test,
+  so it is the half more likely to have drifted. Worse when you wrote it.
+
+  **A refusal that leaves the refused value in force is not a refusal.** Validation at a save or an
+  apply usually runs after the input has already been written somewhere, so returning early rejects
+  the persistence and keeps the effect: a log saying no, a system doing it anyway, and a read-back
+  siding with the system. Refuse, restore, and say so — and prefer refusing to choosing, since
+  silently dropping one of two explicit instructions is the program deciding which it preferred.
+
 ## 2026-09-15
 
 ### Fixed
