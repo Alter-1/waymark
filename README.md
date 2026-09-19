@@ -245,6 +245,9 @@ A link may target `symbol:`, `constant:`, `annotation:`, `concept:`, `route:`, `
 * **Bare names resolve to qualified ones.** `symbol:compact` finds `Store::compact`, because that
   is how you looked it up. A name that matches more than one symbol stays `ambiguous` and asks you
   to qualify it, rather than silently picking the first.
+* **`@path` picks one file.** When the same name is defined in several files, as a page function
+  is in every page that carries it, `symbol:pick@src/p.html` names one of them (so does
+  `constant:`). The path is repository-relative, exactly as `symbol` prints it.
 * **A concept and the annotation elaborating it are one subject.** They share a `concept_id`, so
   `annotation:compaction` resolves to the entry holding the content instead of complaining that the
   name is ambiguous with its own concept.
@@ -755,6 +758,9 @@ Four more optional fields decide **what** gets scanned and **which grammar** par
 * `skip_dirs` — directories never descended into. Replaces the built-in set rather than adding to
   it, because a project that names them is describing its own tree.
 * `max_file_bytes` — size cap per file, default 2 MB.
+* `index_ignored` — `true` indexes files git ignores. By default they are skipped: a render, a
+  scratch copy or a nested checkout never reaches a clone, and indexing one duplicates every
+  definition in it. Outside a git repository nothing is skipped.
 
 This buys navigation, not comprehension: a C# tree indexed as C-like yields methods and classes but
 misses properties and expression-bodied members. On a real 421-file C# project it found 5714 symbols

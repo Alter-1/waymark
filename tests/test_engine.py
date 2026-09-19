@@ -463,7 +463,10 @@ def main():
             {"name": "awkward", "kind": "feature", "files": [],
              "see_also": [{"target": "plain", "note": "x: y"}],
              "min_fw": "[not a list]", "evidence": "  padded  ",
-             "notes": "Has a colon: here, and a dash - there.\n\n  indented line"},
+             "notes": "Has a colon: here, and a dash - there.\n\n  indented line",
+             # a hand-written "## THE CAUSE: x" section comes back as a key with a colon in it;
+             # written into the frontmatter it split at the colon on the next read
+             "THE CAUSE: a colon in a heading": "Body.\nSecond line."},
             {"name": "weird/name*with:punct", "kind": "feature", "notes": "n"},
         ],
         "concepts": [{"concept_id": "c.one", "name": "one", "meaning": "M", "symbols": ["s"]}],
@@ -495,6 +498,37 @@ def main():
             check("an unparseable entry raises rather than dropping fields",
                   "broken.md" in str(exc), str(exc)[:120])
         bad.unlink()
+
+        # THREE MORE WAYS A HAND-WRITTEN ENTRY LOST TEXT WITHOUT A WORD (fbi KB, 2026-09-19): a lead
+        # paragraph before the first "## " was discarded (51 entries, never indexed); a section
+        # named like a frontmatter key replaced that key (a "## status" section turned a resolved
+        # entry's status into a paragraph); a repeated heading kept only the last section.
+        lead = root / "features" / "lead.md"
+        lead.write_text("---\nname: lead\nstatus: open\n---\n\nThe lead paragraph.\n\n## notes\n\nx\n",
+                        encoding="utf-8")
+        got = [e for e in _ic.read_kb_dir(root)["features"] if e.get("name") == "lead"]
+        check("a lead paragraph is kept as the brief",
+              bool(got) and got[0].get("brief") == "The lead paragraph." and got[0].get("notes") == "x",
+              str(got)[:200])
+        lead.write_text("---\nname: lead\n---\n\n<!-- a note to the editor -->\n\n## brief\n\nb\n",
+                        encoding="utf-8")
+        got = [e for e in _ic.read_kb_dir(root)["features"] if e.get("name") == "lead"]
+        check("a lead that is only an HTML comment is neither content nor an error",
+              bool(got) and got[0].get("brief") == "b", str(got)[:200])
+        for label, text in (
+                ("a lead paragraph AND a brief section raise",
+                 "---\nname: lead\n---\n\nLead.\n\n## brief\n\nAlso a brief.\n"),
+                ("a section named like a frontmatter key raises",
+                 "---\nname: lead\nstatus: resolved\n---\n\n## status\n\nhow it shows in the UI\n"),
+                ("a repeated section heading raises",
+                 "---\nname: lead\n---\n\n## notes\n\none\n\n## notes\n\ntwo\n")):
+            lead.write_text(text, encoding="utf-8")
+            try:
+                _ic.read_kb_dir(root)
+                check(label, False, "it was accepted")
+            except ValueError as exc:
+                check(label, "lead.md" in str(exc), str(exc)[:120])
+        lead.unlink()
 
     # and the whole point: a directory KB indexes to the same thing a file KB does
     with tempfile.TemporaryDirectory() as tdk2:
@@ -1738,6 +1772,49 @@ def main():
         rc, out, _ = query("dangling-refs", cwd=proj)
         check("dangling-refs names the removed definition", "doomed" in out, out[:300])
         check("dangling-refs names who still calls it", "user" in out, out[:300])
+
+    # ---------------------------------------------------------------------------------------
+    # A GITIGNORED FILE IS NOT PART OF THE REPOSITORY, and one name defined in several files needs
+    # a way to say which. Both from one tree (fbi, 2026-09-19): three gitignored renders of the
+    # config pages put 572 duplicate page functions into the index, and a see_also to a function
+    # that genuinely lives in two pages could only ever read `ambiguous`.
+    with tempfile.TemporaryDirectory() as tdg:
+        gr = Path(tdg) / "repo"; (gr / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py"):
+            (gr / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (gr / "src").mkdir()
+        for name in ("p.html", "q.html", "p.rendered.html"):
+            (gr / "src" / name).write_text("<script>\nfunction pick() { return 1; }\n</script>\n",
+                                           encoding="utf-8")
+        (gr / ".gitignore").write_text("*.rendered.html\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", "."], cwd=str(gr), capture_output=True)
+        kb = gr / "kb"; (kb / "features").mkdir(parents=True)
+        (kb / "kb.json").write_text(json.dumps(
+            {"schema": 2, "scope": "shared", "collections": ["features"]}), encoding="utf-8")
+        (kb / "features" / "alpha.md").write_text(
+            "---\nconcept_id: t.alpha\nname: alpha\nkind: rule\nstatus: resolved\nsee_also:\n"
+            "  - symbol:pick@src/p.html\n  - symbol:pick\n  - symbol:pick@src/nowhere.html\n"
+            "---\n\n## notes\n\nbody\n", encoding="utf-8")
+
+        def build_g(cfg):
+            (gr / "kb.config.json").write_text(json.dumps(cfg), encoding="utf-8")
+            run([str(gr / ".tools" / "index_code.py"), "--force"], cwd=gr)
+            rc, out, _ = query("--json", "symbol", "pick", cwd=gr)
+            doc = json.loads(out) if rc == 0 and out.strip().startswith("{") else {}
+            return sorted(r.get("file") for r in doc.get("rows", [])), query("broken-links", cwd=gr)[1]
+
+        files, rep = build_g({"roots": ["src"], "annotations": "kb"})
+        check("a gitignored file is not indexed", files == ["src/p.html", "src/q.html"], str(files))
+        check("symbol:name@file resolves to the one definition in that file",
+              "pick@src/p.html" not in rep, rep.strip()[:300])
+        check("the bare name defined in two files is still ambiguous",
+              re.search(r"target: pick\s*\n\s*status: ambiguous", rep) is not None, rep.strip()[:300])
+        check("@file naming a file without the definition is missing",
+              re.search(r"target: pick@src/nowhere.html\s*\n\s*status: missing", rep) is not None,
+              rep.strip()[:300])
+        files, _ = build_g({"roots": ["src"], "annotations": "kb", "index_ignored": True})
+        check("index_ignored: true indexes ignored files as before",
+              files == ["src/p.html", "src/p.rendered.html", "src/q.html"], str(files))
 
     # ---------------------------------------------------------------------------------------
     # A DEFINITION WHOSE PARAMETER LIST WRAPS. sample/core/store.cpp carries one on purpose --

@@ -150,6 +150,11 @@ SKIP_DIRS = set(PROJECT.get("skip_dirs") or {
     "build", "dist", "Production", "Archive",
 })
 MAX_FILE_BYTES = int(PROJECT.get("max_file_bytes") or 2_000_000)
+# WHAT GIT IGNORES IS NOT THE REPOSITORY. A render, a scratch copy, a nested checkout: none of them
+# reaches a clone, and each one indexed duplicates real definitions -- three gitignored renders of
+# one tree's config pages put 572 page functions in twice, and every link to one read `ambiguous`.
+# `index_ignored: true` restores the old walk for a project that really wants its ignored files.
+INDEX_IGNORED = bool(PROJECT.get("index_ignored"))
 INDEX_SCHEMA_VERSION = "11"     # 11: guarded_by + the guards table
 CLS_CODE = "C"
 CLS_LINE_COMMENT = "L"
@@ -981,7 +986,35 @@ def iter_source_files(roots: list[str]) -> list[Path]:
                 except OSError:
                     continue
                 files.append(path)
-    return sorted(files)
+    return _drop_gitignored(sorted(files))
+
+
+def _drop_gitignored(files: list) -> list:
+    """The files git does not ignore. Outside a repository, or when git refuses, all of them."""
+    if INDEX_IGNORED or not files:
+        return files
+    top = REPO_ROOT.resolve()
+    rel = []
+    for path in files:
+        try:
+            rel.append(path.relative_to(top).as_posix())
+        except ValueError:
+            rel.append("")
+    try:
+        proc = subprocess.run(["git", "-C", str(top), "check-ignore", "--stdin", "-z"],
+                              input="".join(r + "\0" for r in rel if r),
+                              capture_output=True, text=True)
+    except OSError:
+        return files
+    # 0 = some ignored, 1 = none. Anything else (not a repository, a path inside a submodule) says
+    # nothing about ignores; index everything, as before -- but SAY so when it is a repository.
+    if proc.returncode not in (0, 1):
+        if (top / ".git").exists():
+            print("index: .gitignore not applied -- git check-ignore: %s"
+                  % (proc.stderr.strip().splitlines() or ["exit %d" % proc.returncode])[0], file=sys.stderr)
+        return files
+    ignored = set(x for x in proc.stdout.split("\0") if x)
+    return [path for path, r in zip(files, rel) if not r or r not in ignored]
 
 
 # Decode source with the encoding it is actually in.
@@ -2703,16 +2736,23 @@ def _candidate(
 
 def resolve_link_candidates(con: sqlite3.Connection, target_type: str, target: str) -> list[dict]:
     candidates: list[dict] = []
+    # ONE NAME, SEVERAL FILES, AND THE LINK MEANS ONE OF THEM: `symbol:ch_bu@web/config_c3.html`.
+    # The same page function lives in every config page, so the bare name can only ever be
+    # `ambiguous`; the qualifier is how an entry says which copy it is about.
+    in_file = ""
+    if target_type in {"symbol", "constant"} and "@" in target:
+        target, _, in_file = target.partition("@")
+        target, in_file = target.strip(), in_file.strip()
     if target_type in {"auto", "symbol"}:
         rows = con.execute(
             """
             SELECT name, file, line
             FROM symbols
-            WHERE name=? AND commented_out=0
+            WHERE name=? AND commented_out=0 AND (?='' OR file=?)
             ORDER BY file, line
             LIMIT 2
             """,
-            (target,),
+            (target, in_file, in_file),
         )
         candidates.extend(_candidate("symbol", row[0], row[1], row[2]) for row in rows)
         # A METHOD IS INDEXED QUALIFIED (BaseSerial::check_when_can_send) AND AUTHORED BARE. The
@@ -2727,11 +2767,11 @@ def resolve_link_candidates(con: sqlite3.Connection, target_type: str, target: s
                 """
                 SELECT name, file, line
                 FROM symbols
-                WHERE name LIKE ? ESCAPE '\\' AND commented_out=0
+                WHERE name LIKE ? ESCAPE '\\' AND commented_out=0 AND (?='' OR file=?)
                 ORDER BY file, line
                 LIMIT 2
                 """,
-                (f"%::{tail}",),
+                (f"%::{tail}", in_file, in_file),
             )
             candidates.extend(_candidate("symbol", row[0], row[1], row[2]) for row in rows)
     if target_type in {"auto", "constant"}:
@@ -2739,11 +2779,11 @@ def resolve_link_candidates(con: sqlite3.Connection, target_type: str, target: s
             """
             SELECT name, file, line
             FROM constants
-            WHERE name=? AND commented_out=0
+            WHERE name=? AND commented_out=0 AND (?='' OR file=?)
             ORDER BY file, line
             LIMIT 2
             """,
-            (target,),
+            (target, in_file, in_file),
         )
         candidates.extend(_candidate("constant", row[0], row[1], row[2]) for row in rows)
     if target_type in {"auto", "annotation"}:
@@ -2994,12 +3034,22 @@ def _fm_scalar(value: str) -> str:
     return value
 
 
+def _fm_key_ok(key: str) -> bool:
+    """Can this key be written as `key: value` and read back as the same key?"""
+    return bool(key) and ":" not in key and "\n" not in key and key == key.strip() and key[0] != "#"
+
+
 def entry_to_text(item: dict) -> str:
     front, body = [], []
     for key in sorted(item):
         value = item[key]
-        if key in BODY_FIELDS and isinstance(value, str):
+        # A KEY THE FRONTMATTER CANNOT HOLD GOES TO THE BODY. A hand-written "## THE CAUSE: x"
+        # section reads back as a key with a colon in it; written as "THE CAUSE: x: ..." it split
+        # at the first colon on the next read and came back as a different key.
+        if isinstance(value, str) and (key in BODY_FIELDS or not _fm_key_ok(key)):
             body.append((key, value))
+        elif not _fm_key_ok(key):
+            raise ValueError("key %r cannot be written: not a string, and not a frontmatter key" % key)
         elif isinstance(value, str):
             front.append("%s: %s" % (key, _fm_scalar(value)))
         elif isinstance(value, list) and all(isinstance(x, str) for x in value):
@@ -3040,9 +3090,33 @@ def text_to_entry(text: str, where: str) -> dict:
         else:
             item[key] = _read_value(raw, where, lineno)
             pending = None
-    for chunk in re.split(r"^## ", body, flags=re.M)[1:]:
+    # NOTHING IN THE BODY MAY VANISH, and three things did (fbi KB, 2026-09-19): the text before
+    # the first "## " was discarded -- 51 entries opened with a paragraph nobody could search for;
+    # a section named like a frontmatter key replaced it -- a "## status" section about the UI
+    # turned a resolved entry's status into that paragraph, and the entry left the vocabulary;
+    # and a repeated heading kept only its last section. A lead paragraph is the natural way to
+    # open a note, so it is ACCEPTED, as the brief; the other two are errors.
+    chunks = re.split(r"^## ", body, flags=re.M)
+    sections: dict = {}
+    for chunk in chunks[1:]:
         head, _, rest = chunk.partition("\n")
-        item[head.strip()] = rest.strip("\n")
+        head = head.strip()
+        if head in item:
+            raise ValueError("%s: section '## %s' has the name of a frontmatter field and would "
+                             "replace it -- rename the heading" % (where, head))
+        if head in sections:
+            raise ValueError("%s: section '## %s' appears twice -- only the last would survive"
+                             % (where, head))
+        sections[head] = rest.strip("\n")
+    lead = chunks[0].strip("\n")
+    # An HTML comment is a note to whoever edits the file, not content: a lead that is ONLY that
+    # stays out of the index, exactly as before.
+    if re.sub(r"<!--.*?-->", "", lead, flags=re.S).strip():
+        if "brief" in item or "brief" in sections:
+            raise ValueError("%s: text before the first '## ' AND a brief -- move the lead paragraph "
+                             "into '## brief' or under a heading of its own" % where)
+        item["brief"] = lead
+    item.update(sections)
     return item
 
 

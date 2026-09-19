@@ -5,6 +5,25 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-19
+
+### Fixed
+* **The body of an entry no longer loses text without a word.** Text before the first `## ` was
+  discarded; it is now the entry's `brief`. A `## heading` named like a frontmatter key used to
+  replace that key, and a repeated heading kept only its last section; both are now errors that
+  name the file. On the tree that found them, 51 entries opened with a paragraph nobody could
+  search for, and a `## status` section had turned a resolved entry's status into prose.
+* **A heading with a colon in it survives a write-back.** `## THE CAUSE: x` became a frontmatter
+  line, and the next read split it at the colon.
+
+### Changed
+* **Gitignored files are no longer indexed.** Set `index_ignored: true` to get them back. On the
+  tree that found this, three gitignored page renders put 572 page functions into the index twice.
+
+### Added
+* **`symbol:name@path` and `constant:name@path`** pin a link to one of several files defining the
+  same name. The bare name stays `ambiguous`.
+
 ## 2026-09-15 (later)
 
 ### Changed

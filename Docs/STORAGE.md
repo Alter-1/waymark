@@ -56,6 +56,18 @@ key:
 Anything the reader cannot parse is a hard **error** naming the file and line — never a silently
 dropped field. That rule is what makes the format safe to hand-edit.
 
+### The body: every `## heading` is a field
+
+Each `## heading` becomes a field named by the heading, holding the text under it. Three shapes
+that used to lose text without a word:
+
+* **Text before the first `## `** is kept as the entry's `brief`. It is the natural way to open a
+  note, so it is accepted. It is an error only when the entry also has a `brief`. A lead that is
+  only an `<!-- HTML comment -->` is a note to the editor, not content, and stays out of the index.
+* **A heading named like a frontmatter key** (`## status` in an entry with `status:`) is an error.
+  It would replace the field.
+* **The same heading twice** is an error. Only the last section would survive.
+
 ### Keys that carry weight
 
 | key | what it does |
@@ -65,7 +77,7 @@ dropped field. That rule is what makes the format safe to hand-edit.
 | `status` | closed vocabulary: `open` / `resolved` / `wontfix` / `n/a`, so "what is still open?" is answerable without reading everything |
 | `evidence` | `measured` / `inferred` / `mixed` / `unknown` — a fact reasoned to is not the same kind of thing as one observed, and the reader deserves to know which |
 | `claims` | dated assertions with their own status, including the ones that **died** — a dead hypothesis recorded is a week nobody spends re-deriving it |
-| `see_also` | explicit typed links: `symbol:`, `annotation:`, `concept:`, `file:` |
+| `see_also` | explicit typed links: `symbol:`, `annotation:`, `concept:`, `file:`; `symbol:name@path` pins a name defined in several files |
 
 Inline `[[entry-name]]` anywhere in the body is indexed and validated too. A link to an entry that
 does not exist yet is not an error — it marks something worth writing.
