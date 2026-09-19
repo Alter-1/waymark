@@ -111,6 +111,11 @@ def build(td):
     git(repo, "checkout", "-q", "-b", "cmt_dst", "cmt_src")
     write(repo, "src/c.c", "int fn(void)\n{\n    counter_value = compute_the_thing() | 1;\n}\n")
     cmt = commit(repo, "c: the same line, comment dropped")
+    # 6. a branch that has the old line only COMMENTED OUT
+    git(repo, "checkout", "-q", "-b", "commented_out", "main")
+    write(repo, "src/a.c", BASE_A.replace("    memcpy(&state->linkq, buf, sizeof(crsf_telemetry_state_t));",
+                                          "    //memcpy(&state->linkq, buf, sizeof(crsf_telemetry_state_t));\n    memcpy(&state->linkq, buf, sizeof(state->linkq));"))
+    commit(repo, "fixed, old call left commented out")
     git(repo, "checkout", "-q", "-b", "quoted", "main")
     # a branch WITHOUT the fix whose old line appears only QUOTED in an unrelated file
     write(repo, "src/a.c", BASE_A.replace("sizeof(crsf_telemetry_state_t)", "sizeof(state->linkq)"))
@@ -147,6 +152,8 @@ def main():
         uold, _, _ = v.old_lines_for(r, undone, tip="fixed")
         check("undone later: back at the source tip, so not 'old code'", uold == [], uold)
 
+        check("old line only COMMENTED OUT on the target is not a hit",
+              v.old_hits_in_ref(r, "commented_out", by_path, exts, None) == 0)
         check("old line QUOTED in another file of the target is not a hit (same-file search)",
               v.old_hits_in_ref(r, "quoted", by_path, exts, None) == 0)
         check("...while the stale branch's own file is", v.old_hits_in_ref(r, "stale", by_path, exts, None) == 1)

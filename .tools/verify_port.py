@@ -208,15 +208,17 @@ def _grep_found(repo, rev, patterns, exts, skip, paths=None):
     """Which of these fixed strings occur anywhere in `rev` (a commit or ref), in files of the given
     types, outside paths matching `skip`? One `git grep -f` for the lot.
 
-    `-o` reports each match once at a position, so a pattern that is a substring of a longer one
-    matching at the same place can be shadowed -- the found set is widened by containment below."""
+    MATCHES INSIDE A COMMENT DO NOT COUNT. Measured on a real tree: two "gaps" were the old call
+    sitting commented out on the other branch, and one was the line quoted in a comment above its
+    replacement. Commented-out code is not code -- on either side: a line the commit moved into a
+    comment counts as eliminated, which is what it is."""
     if not patterns:
         return set()
     fd, path = tempfile.mkstemp(prefix="verify_port.")
     try:
         with os.fdopen(fd, "w") as f:
             f.write("\n".join(patterns) + "\n")
-        cmd = ["git", "-C", repo, "grep", "-F", "-o", "-I", "-f", path, rev, "--"]
+        cmd = ["git", "-C", repo, "grep", "-F", "-n", "-I", "-f", path, rev, "--"]
         if paths:
             cmd += list(paths)
         elif exts and all(exts):
@@ -229,14 +231,19 @@ def _grep_found(repo, rev, patterns, exts, skip, paths=None):
     for line in out.splitlines():
         if line.startswith(prefix):
             line = line[len(prefix):]
-        fpath, sep, match = line.partition(":")
+        fpath, sep, rest = line.partition(":")
         if not sep or (skip and skip.search(fpath)):
             continue
-        found.add(match)
-    for p in patterns:
-        if p not in found and any(p in m for m in found):
-            found.add(p)
-    return found & set(patterns)
+        _lineno, sep, body = rest.partition(":")
+        if not sep:
+            continue
+        stripped = body.strip()
+        if _is_comment(stripped, os.path.splitext(fpath)[1]):
+            continue
+        for pat in patterns:
+            if pat in body:
+                found.add(pat)
+    return found
 
 
 def old_lines_for(repo, sha, skip=None, min_len=20, tip=None):
