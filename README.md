@@ -300,6 +300,11 @@ views of the same tree, so when the target is absent here the other branches' in
 | none of them has it | **`missing`** — the claim is refuted, usually a typo in the name |
 | there are no siblings yet | `branch-scoped` — nothing to check against, so trust |
 
+**A `file:` target is asked of git instead** (`git cat-file -e <branch>:<path>` on each of
+`commit_branches`, or every local branch when that is not set). A file outside the scanned roots, a
+`Docs/` document above all, is in no index, so the siblings used to refute every such link. Git
+needs no index, so the answer is the same on a fresh clone.
+
 That last row matters: a fresh clone has one branch indexed, and refusing the claim there would
 break the feature exactly where it is needed. *Unverifiable* is not the same as *refuted*. This
 branch's own index is excluded from the check — a stale copy of it could otherwise confirm a claim

@@ -1817,6 +1817,59 @@ def main():
               files == ["src/p.html", "src/p.rendered.html", "src/q.html"], str(files))
 
     # ---------------------------------------------------------------------------------------
+    # branch_scoped ON A FILE IS ANSWERED BY GIT. The claim "this exists on another branch" was
+    # checked against the sibling branches' INDEXES, and a file outside the scanned roots (Docs/)
+    # is in no index -- so a design document present on one branch read `missing` on every other
+    # one, marker or not (fbi, 2026-09-19: two links on the 1.18 branch).
+    with tempfile.TemporaryDirectory() as tdb:
+        br = Path(tdb) / "repo"; (br / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py"):
+            (br / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (br / "src").mkdir(); (br / "src" / "a.c").write_text("void a(void){}\n", encoding="utf-8")
+        g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(br)]
+        subprocess.run(g + ["init", "-q", "."], capture_output=True)
+        subprocess.run(g + ["checkout", "-q", "-b", "one"], capture_output=True)
+        subprocess.run(g + ["add", "src/a.c"], capture_output=True)
+        subprocess.run(g + ["commit", "-q", "-m", "one"], capture_output=True)
+        subprocess.run(g + ["checkout", "-q", "-b", "two"], capture_output=True)
+        (br / "Docs").mkdir(); (br / "Docs" / "two-only.md").write_text("# two\n", encoding="utf-8")
+        subprocess.run(g + ["add", "Docs/two-only.md"], capture_output=True)
+        subprocess.run(g + ["commit", "-q", "-m", "two"], capture_output=True)
+        subprocess.run(g + ["checkout", "-q", "one"], capture_output=True)
+        kb = br / "kb"; (kb / "features").mkdir(parents=True)
+        (kb / "kb.json").write_text(json.dumps(
+            {"schema": 2, "scope": "shared", "collections": ["features"]}), encoding="utf-8")
+        (kb / "features" / "alpha.md").write_text(
+            "---\nconcept_id: t.alpha\nname: alpha\nkind: rule\nstatus: resolved\nsee_also:\n"
+            '  - {"type": "file", "target": "Docs/two-only.md", "status": "branch_scoped"}\n'
+            '  - {"type": "file", "target": "Docs/on-no-branch.md", "status": "branch_scoped"}\n'
+            "---\n\n## notes\n\nbody\n", encoding="utf-8")
+        (br / "kb.config.json").write_text(json.dumps(
+            {"roots": ["src"], "annotations": "kb", "commit_branches": ["one", "two"]}), encoding="utf-8")
+        # branch two indexed first: its index is the sibling that used to REFUTE the file
+        subprocess.run(g + ["checkout", "-q", "two"], capture_output=True)
+        run([str(br / ".tools" / "index_code.py"), "--force"], cwd=br)
+        subprocess.run(g + ["checkout", "-q", "one"], capture_output=True)
+        run([str(br / ".tools" / "index_code.py"), "--force"], cwd=br)
+        rep = query("broken-links", cwd=br)[1]
+        check("a branch_scoped file that another branch has is branch-scoped, not missing",
+              re.search(r"target: Docs/two-only.md\s*\n\s*status: branch-scoped", rep) is not None,
+              rep.strip()[:300])
+        check("a branch_scoped file that no branch has is still missing",
+              re.search(r"target: Docs/on-no-branch.md\s*\n\s*status: missing", rep) is not None,
+              rep.strip()[:300])
+        # and with NO sibling index at all -- a fresh clone -- git still answers: the misspelt path
+        # used to pass as branch-scoped there, because "no evidence" was all the engine had
+        for f in (br / ".tools").glob("code_index.two.*"):
+            f.unlink()
+        run([str(br / ".tools" / "index_code.py"), "--force"], cwd=br)
+        rep = query("broken-links", cwd=br)[1]
+        check("without a sibling index a branch_scoped file is still checked",
+              re.search(r"target: Docs/two-only.md\s*\n\s*status: branch-scoped", rep) is not None
+              and re.search(r"target: Docs/on-no-branch.md\s*\n\s*status: missing", rep) is not None,
+              rep.strip()[:300])
+
+    # ---------------------------------------------------------------------------------------
     # A DEFINITION WHOSE PARAMETER LIST WRAPS. sample/core/store.cpp carries one on purpose --
     # Store::copy_range, whose ')' is on the next line. Before this was handled, such a function
     # got no symbol row at all: no notes, no refs, no graph, and any KB entry naming it read as

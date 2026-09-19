@@ -2851,6 +2851,25 @@ def sibling_branch_indexes(exclude: object = None) -> list:
     return out
 
 
+def file_on_another_branch(path: str) -> object:
+    """True / False / None -- is this path in the project's branches (commit_branches, else every
+    local branch)? None when git cannot say: not a repository, or none of those branches exists."""
+    top = str(REPO_ROOT)
+    try:
+        heads = subprocess.run(["git", "-C", top, "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+                               capture_output=True, text=True)
+        if heads.returncode != 0:
+            return None
+        branches = [b for b in heads.stdout.split() if not COMMIT_BRANCHES or b in COMMIT_BRANCHES]
+        for branch in branches:
+            if subprocess.run(["git", "-C", top, "cat-file", "-e", "%s:%s" % (branch, path)],
+                              capture_output=True).returncode == 0:
+                return True
+    except OSError:
+        return None
+    return False if branches else None
+
+
 def resolves_on_another_branch(target_type: str, target: str, exclude: object = None) -> object:
     """True / False / None -- found elsewhere, refuted, or nothing to check against.
 
@@ -2859,6 +2878,11 @@ def resolves_on_another_branch(target_type: str, target: str, exclude: object = 
     needed. False means siblings WERE consulted and none of them has the target, which is the
     interesting case: the claim is wrong, usually a typo in the name.
     """
+    # A FILE IS ANSWERED BY GIT, NOT BY AN INDEX. A file outside the scanned roots -- Docs/, most
+    # often -- is in no branch's index, so the siblings REFUTED every branch_scoped file link and a
+    # document present on one branch read `missing` on all the others, marker or not.
+    if target_type == "file":
+        return file_on_another_branch(target)
     checked = 0
     for path in sibling_branch_indexes(exclude):
         try:

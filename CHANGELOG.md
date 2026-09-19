@@ -13,6 +13,10 @@ getting; the commit messages carry the reasoning and the measurements behind the
   replace that key, and a repeated heading kept only its last section; both are now errors that
   name the file. On the tree that found them, 51 entries opened with a paragraph nobody could
   search for, and a `## status` section had turned a resolved entry's status into prose.
+* **`branch_scoped` works on `file:` links.** The claim was checked against the other branches'
+  indexes, and a file outside the scanned roots is in none of them, so a document present on one
+  branch read `missing` on every other one, marker or not. Git is now asked directly. That also
+  catches a misspelt path on a fresh clone, where the missing sibling index used to let it pass.
 * **A heading with a colon in it survives a write-back.** `## THE CAUSE: x` became a frontmatter
   line, and the next read split it at the colon.
 
