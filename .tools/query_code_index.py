@@ -922,6 +922,33 @@ def main() -> int:
                               "WHERE label_src = 'suspect'").fetchone()[0]
         chk("param labels clean", suspect == 0, f"{suspect} fields with uncertain labels")
 
+        # THE INDEX MUST NOT BE OLDER THAN ITS KB. A rebuild that FAILS -- one entry file the reader
+        # rightly refuses is enough -- leaves the previous index in place, and every check above then
+        # passes against knowledge that is hours out of date. Seen on the fbi tree 2026-09-19: a
+        # "## status" heading made every rebuild fail while selftest stayed green, because the build
+        # output was being discarded -- the same blind spot the first comment in this command names.
+        try:
+            meta = dict(con.execute("SELECT key, value FROM meta").fetchall())
+            from datetime import datetime as _dt
+            built = _dt.fromisoformat(meta.get("build_started_at", "")).timestamp()
+            newer = []
+            for s in (meta.get("annotations") or "").split(","):
+                kp = Path(s) if s else None
+                if kp is None or not kp.exists():
+                    continue
+                cand = [kp] if kp.is_file() else [f for f in kp.rglob("*")
+                                                  if f.is_file() and ".git" not in f.parts
+                                                  and f.suffix in (".md", ".json")]
+                newer += [f for f in cand if f.stat().st_mtime > built + 1]
+            if newer:
+                chk("index newer than its KB", False,
+                    f"{len(newer)} KB file(s) changed after the last build, e.g. {newer[0].name} -- "
+                    f"rebuild; if the rebuild fails, its error is the cause")
+            else:
+                chk("index newer than its KB", True, "no KB file changed since the last build")
+        except Exception as exc:              # an index from an older engine has no such meta
+            checks.append(("index newer than its KB", "n/a", str(exc)[:60]))
+
         # THE PARAM MAP IS AN OPTIONAL PROJECT PLUGIN. A repository that does not ship
         # gen_param_map.py has no maps to drift, so the check does not apply -- reporting it as a
         # PROBLEM made selftest exit 1 on every project but this one, which is the difference

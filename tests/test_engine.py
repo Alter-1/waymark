@@ -1870,6 +1870,46 @@ def main():
               rep.strip()[:300])
 
     # ---------------------------------------------------------------------------------------
+    # THE INDEX MUST NOT BE OLDER THAN ITS KB. A rebuild that FAILS -- one entry file the reader
+    # rightly refuses is enough -- leaves the previous index in place, and every selftest check then
+    # passes against stale knowledge. fbi, 2026-09-19: a "## status" heading made every rebuild
+    # fail for hours while selftest stayed green.
+    with tempfile.TemporaryDirectory() as tds:
+        sr = Path(tds) / "repo"; (sr / ".tools").mkdir(parents=True)
+        for f in ("index_code.py", "query_code_index.py"):
+            (sr / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
+        (sr / "src").mkdir(); (sr / "src" / "a.c").write_text("void a(void){}\n", encoding="utf-8")
+        kb = sr / "kb"; (kb / "features").mkdir(parents=True)
+        (kb / "kb.json").write_text(json.dumps(
+            {"schema": 2, "scope": "shared", "collections": ["features"]}), encoding="utf-8")
+        ent = kb / "features" / "alpha.md"
+        ent.write_text("---\nconcept_id: t.alpha\nname: alpha\nkind: rule\nstatus: resolved\n---\n\n"
+                       "## notes\n\nbody\n", encoding="utf-8")
+        (sr / "kb.config.json").write_text(json.dumps({"roots": ["src"], "annotations": "kb"}),
+                                           encoding="utf-8")
+        run([str(sr / ".tools" / "index_code.py"), "--force"], cwd=sr)
+        rc, out, _ = query("selftest", cwd=sr)
+        check("a fresh index is newer than its KB", "index newer than its KB" in out and
+              not re.search(r"index newer than its KB\s*\n\s*result: PROBLEM", out), out[-400:])
+        import time as _t
+        _t.sleep(1.2)
+        # an entry the reader refuses: the rebuild fails and the OLD index stays
+        ent.write_text("---\nconcept_id: t.alpha\nname: alpha\nstatus: resolved\n---\n\n"
+                       "## status\n\nclashes with the field\n", encoding="utf-8")
+        p = subprocess.run([sys.executable, str(sr / ".tools" / "index_code.py")], cwd=str(sr),
+                           capture_output=True, text=True)
+        check("the rebuild of a refused entry fails", p.returncode != 0, p.stdout[-200:])
+        rc, out, _ = query("selftest", cwd=sr)
+        check("selftest says the index is older than its KB", rc != 0 and
+              re.search(r"index newer than its KB\s*\n\s*result: PROBLEM", out) is not None, out[-400:])
+        ent.write_text("---\nconcept_id: t.alpha\nname: alpha\nstatus: resolved\n---\n\n"
+                       "## notes\n\nfixed\n", encoding="utf-8")
+        run([str(sr / ".tools" / "index_code.py")], cwd=sr)
+        rc, out, _ = query("selftest", cwd=sr)
+        check("...and is green again after a good rebuild",
+              not re.search(r"index newer than its KB\s*\n\s*result: PROBLEM", out), out[-400:])
+
+    # ---------------------------------------------------------------------------------------
     # A DEFINITION WHOSE PARAMETER LIST WRAPS. sample/core/store.cpp carries one on purpose --
     # Store::copy_range, whose ')' is on the next line. Before this was handled, such a function
     # got no symbol row at all: no notes, no refs, no graph, and any KB entry naming it read as
