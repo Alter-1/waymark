@@ -7,6 +7,11 @@ getting; the commit messages carry the reasoning and the measurements behind the
 
 ## 2026-09-19
 
+### Added
+* **`selftest` fails when the index is older than its KB.** A rebuild that fails -- one entry
+  file the reader refuses is enough -- leaves the previous index in place, and every other check
+  then passes against stale knowledge. The new check names a KB file changed after the last build.
+
 ### Fixed
 * **The body of an entry no longer loses text without a word.** Text before the first `## ` was
   discarded; it is now the entry's `brief`. A `## heading` named like a frontmatter key used to
