@@ -198,6 +198,61 @@ def _code_of(body):
     return TRAILING_COMMENT.sub("", body).rstrip()
 
 
+def strip_comments(src, ext):
+    """The file with its comments blanked -- /* */ and // (string-aware), or # for hash languages.
+
+    git grep cannot see a BLOCK comment: measured on a real tree, a whole status block sat inside
+    /* ... */ on three branches and every line in it read as live code, which is a gap that is not
+    there. Lines are preserved so nothing else shifts."""
+    if ext in HASH_COMMENT_EXTS:
+        return "\n".join(l.split("#", 1)[0] if l.lstrip().startswith("#") else l
+                          for l in src.splitlines())
+    out, i, n, quote = [], 0, len(src), ""
+    while i < n:
+        c = src[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(src[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            out.append(c)
+            i += 1
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            end = n if j < 0 else j + 2
+            out.append("\n" * src.count("\n", i, end))
+            i = end
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _file_live(repo, rev, path, cache):
+    key = (rev, path)
+    if key not in cache:
+        try:
+            src = subprocess.check_output(["git", "-C", repo, "show", "%s:%s" % (rev, path)],
+                                          stderr=subprocess.STDOUT).decode("utf-8", "replace")
+        except subprocess.CalledProcessError:
+            cache[key] = None
+            return None
+        cache[key] = strip_comments(src, os.path.splitext(path)[1])
+    return cache[key]
+
+
 def _is_comment(body, ext):
     if body.startswith(("//", "/*", "*", "<!--")):
         return True
@@ -305,16 +360,20 @@ def present_in_ref(repo, ref, token, exts=None):
         return False
 
 
-def old_hits_in_ref(repo, ref, by_path, exts, skip):
-    """How many old lines the ref still carries -- looked for IN THE FILE THE COMMIT CHANGED, where
-    the ref has that file. A whole-tree search matched old text quoted in unrelated files (docs,
-    vendored copies). Where the ref lacks the file (renamed, or never had it), the whole tree of
-    the same file types is searched instead."""
+def old_hits_in_ref(repo, ref, by_path, exts, skip, cache=None):
+    """How many old lines the ref still carries AS LIVE CODE -- in the file the commit changed.
+
+    The file is read and its comments stripped, because neither a block comment nor a commented-out
+    call is code. A whole-tree grep is the fallback only where the ref lacks that file (renamed, or
+    never had it); it matched old text quoted in unrelated files, so it is not the default."""
+    cache = {} if cache is None else cache
     found = set()
     for pth, lines in by_path.items():
-        has = subprocess.call(["git", "-C", repo, "cat-file", "-e", "%s:%s" % (ref, pth)],
-                              stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT) == 0
-        found |= _grep_found(repo, ref, lines, exts, skip, paths=[pth] if has else None)
+        live = _file_live(repo, ref, pth, cache)
+        if live is None:
+            found |= _grep_found(repo, ref, lines, exts, skip)
+            continue
+        found |= set(l for l in lines if l in live)
     return len(found)
 
 

@@ -111,6 +111,12 @@ def build(td):
     git(repo, "checkout", "-q", "-b", "cmt_dst", "cmt_src")
     write(repo, "src/c.c", "int fn(void)\n{\n    counter_value = compute_the_thing() | 1;\n}\n")
     cmt = commit(repo, "c: the same line, comment dropped")
+    # 7. a branch where the old line sits inside a /* ... */ BLOCK comment
+    git(repo, "checkout", "-q", "-b", "block_cmt", "main")
+    write(repo, "src/a.c", BASE_A.replace("static void update_link", "/*\nstatic void update_link")
+                                 .replace("// the link statistics frame", "*/\n// the link statistics frame"))
+    commit(repo, "the whole block commented out")
+
     # 6. a branch that has the old line only COMMENTED OUT
     git(repo, "checkout", "-q", "-b", "commented_out", "main")
     write(repo, "src/a.c", BASE_A.replace("    memcpy(&state->linkq, buf, sizeof(crsf_telemetry_state_t));",
@@ -152,6 +158,10 @@ def main():
         uold, _, _ = v.old_lines_for(r, undone, tip="fixed")
         check("undone later: back at the source tip, so not 'old code'", uold == [], uold)
 
+        check("old line inside a /* */ block on the target is not a hit",
+              v.old_hits_in_ref(r, "block_cmt", by_path, exts, None) == 0)
+        check("strip_comments keeps a string that looks like a comment",
+              '"http://x"' in v.strip_comments('s = "http://x"; // c', '.c'))
         check("old line only COMMENTED OUT on the target is not a hit",
               v.old_hits_in_ref(r, "commented_out", by_path, exts, None) == 0)
         check("old line QUOTED in another file of the target is not a hit (same-file search)",
