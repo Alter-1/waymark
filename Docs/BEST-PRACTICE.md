@@ -203,6 +203,14 @@ returns what you intended, not what you typed. Read the ORDER, the actual sequen
 read the field, not its name. A comment saying "checked before X" is a claim about line numbers, and
 line numbers are cheap to verify and easy to assume.
 
+**And a grep cannot tell live code from a corpse.** `grep`, `git grep` and every line-based search
+show a call sitting inside `/* ... */`, or behind `//`, exactly as they show the real one: same file,
+same line number, same text. Measured while auditing four long-lived branches: three "the other
+branch still has the old code" findings were the old code COMMENTED OUT there, and one of them was
+carried to the author as a question about a divergence that did not exist. Before you conclude that
+a branch, a build or a binary still contains something, look at the line -- or search a copy with
+the comments stripped. What is inside a comment is not in the program.
+
 
 ## 4. Silent success is the worst failure mode
 
