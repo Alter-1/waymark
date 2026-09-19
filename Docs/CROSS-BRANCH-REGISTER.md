@@ -131,6 +131,29 @@ The honest cost is coverage: it returns *nothing testable* for many commits rath
 That is the correct failure mode. It is **triage, not a verdict** — `partial` is the interesting
 column and always needs reading.
 
+### The other half: `+OLD`, the line the fix removed
+
+Tokens cannot see a fix that changes only an argument — `sizeof(state_t)` → `sizeof(state->field)`
+introduces nothing. Measured on the codebase this was written for: that exact fix sat on one of four
+lines for three weeks, `verify_port` called it `no-tokens`, and the other three shipped the memory
+corruption it fixed until a day went into re-finding the writer.
+
+What such a fix leaves is the line it **removed**. A removed line counts only if the commit
+*eliminated* it: it exists nowhere in the tree afterwards (so code moved between files does not
+count) and not at the tip of the source line either (so a change later undone there does not count).
+Trailing comments are stripped first — a fix re-applied without its comment is the same code. The
+target is searched in **its copy of the same file**; a whole-tree search matched old text quoted in
+unrelated files and in frozen copies of the code. Where the target lacks the file, the whole tree of
+the same file types is searched instead.
+
+A hit marks the cell `+OLD`: the branch still carries code this commit got rid of. It is the strongest
+gap signal here and still triage — the line may have gone for a reason that does not apply there.
+
+    verify_port.py --repo . --rev <source> --since <date> --ref a --ref b \
+                   --no-tokens --only-old --hide-shared --skip '<generated paths>'
+
+Branches are named as `--ref`, read through git: a checkout on another branch cannot answer for them.
+
 ## Two ways a presence check answers the wrong question
 
 Both were measured on a real four-line tree on 09-10/09/2026, in the same week, in opposite

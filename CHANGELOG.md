@@ -5,6 +5,21 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-20
+
+### Added
+* **`verify_port.py` sees a fix that only changes an argument** (`+OLD`). Such a fix introduces no
+  token, so the score said `no-tokens` -- nothing testable -- and a real gap stayed invisible:
+  measured, `sizeof(whole_struct)` -> `sizeof(field)` sat fixed on one of four lines for three weeks
+  while the other three shipped the memory corruption. Each commit's REMOVED lines are now kept
+  when the commit eliminated them (not moved: they exist nowhere after it, nor at the tip of the
+  line it is on) and looked for in the target's copy of the same file; a hit marks the cell `+OLD`.
+  Trailing comments are not code. `--only-old`, `--no-tokens` (one grep per commit instead of ~40),
+  `--hide-shared`, `--skip <regex>` for generated files.
+* **`--ref name=<ref>`**: reads the branch through git, so a checkout sitting on another branch
+  cannot answer under the wrong label; a commit already in the ref's history is `in-history`.
+* `tests/test_verify_port.py`.
+
 ## 2026-09-19
 
 ### Added
