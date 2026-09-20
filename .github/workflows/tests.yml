@@ -22,8 +22,17 @@ jobs:
         # built from a missing annotation file and came back silently empty
         run: python3 .tools/query_code_index.py selftest
 
-      - name: Check the engine
-        run: python3 tests/test_engine.py
+      - name: Check the engine and every other suite
+        # EVERY tests/test_*.py, not a list. This step used to name test_engine.py alone, so
+        # test_css_factor, test_kb_stale, test_verify_port and test_xstatus never ran here at all:
+        # four suites, written and green on somebody's laptop, while CI reported success without
+        # them. A loop cannot forget the next one.
+        run: |
+          set -e
+          for t in tests/test_*.py; do
+            echo "== $t"
+            python3 "$t"
+          done
 
   # THE ENGINE MUST STILL PARSE ON THE OLDEST HOST IT IS RUN ON. A ':=' shipped and 3.7 stopped
   # parsing query_code_index.py at import -- which takes out every query and selftest with them, so

@@ -8,6 +8,20 @@ getting; the commit messages carry the reasoning and the measurements behind the
 ## 2026-09-20
 
 ### Added
+* **`shared_paths.py` -- is a directory that must be the same on every branch actually the
+  same?** A repository with parallel release branches usually has a few directories that are
+  deliberately shared: a toolset, an SDK, a test suite. Nothing watched them. Measured on a
+  four-branch firmware tree the day it was written: six scripts existed on ONE branch of four
+  and six more were older copies; the SDK had fifteen files on one branch only; the test suite
+  seventeen. None of it was a merge conflict waiting to happen -- it was work that silently did
+  not exist for three quarters of the people with the repository. The check is a git TREE HASH
+  per branch, so a mode change, a rename or a one-sided file cannot pass as identical, and the
+  branches that agree are grouped rather than compared pairwise. It names paths from
+  `kb.config.json` or the command line and never guesses: which branch is right is a judgement,
+  and an older line may be behind on purpose.
+* **CI runs every `tests/test_*.py`, not just the engine's.** Four suites had been written,
+  were green locally, and had never run in CI at all -- the workflow named one file. A loop
+  cannot forget the next one.
 * **`verify_port.py` sees a fix that only changes an argument** (`+OLD`). Such a fix introduces no
   token, so the score said `no-tokens` -- nothing testable -- and a real gap stayed invisible:
   measured, `sizeof(whole_struct)` -> `sizeof(field)` sat fixed on one of four lines for three weeks

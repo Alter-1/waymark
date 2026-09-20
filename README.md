@@ -687,6 +687,7 @@ Everything above is `query_code_index.py`. These are separate, and each answers 
 | `kb_stale.py` | is the KB still true of the code — see *Whether the knowledge base is still true* |
 | `verify_port.py` | is this commit's substance on that branch? Scores the tokens the commit *introduced*, and marks `+OLD` where the branch still carries a line the commit *eliminated* -- the one signal an argument-only fix leaves. Reads branches as refs (`--ref`). Triage, not a verdict |
 | `xstatus.py` | a cross-branch register: **why** a fix is absent from a branch — never ported, deliberately rejected, not applicable — which git has nowhere to record. See [`Docs/CROSS-BRANCH-REGISTER.md`](Docs/CROSS-BRANCH-REGISTER.md) |
+| `shared_paths.py` | are the directories you have DECLARED shared -- a toolset, an SDK, a test suite -- byte-identical on every branch? Compares git tree hashes and groups the branches that agree, so the report is "three agree, one differs" and names the files. BEST-PRACTICE section 8 states the rule; this is the instrument for it |
 | `css_factor.py` | which repeated CSS declarations can be folded into a selector list, **and whether that is safe**. Refuses any fold the cascade would change, and reports the refusals — usually the more interesting output |
 
 ## Handing work to the next context
