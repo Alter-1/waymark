@@ -14,9 +14,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,21 @@ ROOT = Path(__file__).resolve().parents[1]
 PY_FLOOR_STR = "3.7"
 TOOLS = ROOT / ".tools"
 FAILED = []
+
+
+def _remove_readonly(operation, path, exc_info):
+    """Let Windows clean Git objects created read-only in an owned scratch repository."""
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    operation(path)
+
+
+@contextmanager
+def git_temporary_directory():
+    root = tempfile.mkdtemp()
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, onerror=_remove_readonly)
 
 
 def check(name, cond, detail=""):
@@ -1821,7 +1838,7 @@ def main():
     # checked against the sibling branches' INDEXES, and a file outside the scanned roots (Docs/)
     # is in no index -- so a design document present on one branch read `missing` on every other
     # one, marker or not (fbi, 2026-09-19: two links on the 1.18 branch).
-    with tempfile.TemporaryDirectory() as tdb:
+    with git_temporary_directory() as tdb:
         br = Path(tdb) / "repo"; (br / ".tools").mkdir(parents=True)
         for f in ("index_code.py", "query_code_index.py"):
             (br / ".tools" / f).write_bytes((TOOLS / f).read_bytes())
@@ -2232,7 +2249,10 @@ def main():
 def _branch():
     p = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(ROOT),
                        capture_output=True, text=True)
-    return p.stdout.strip().replace("/", "_") or "nogit"
+    branch = p.stdout.strip()
+    if not branch or branch == "HEAD":
+        branch = "detached"
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", branch).strip("._-") or "unknown"
 
 
 if __name__ == "__main__":

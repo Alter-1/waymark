@@ -11,26 +11,36 @@ failure, and record the dead ends as well as the answer.
 
 Before any investigation, bugfix, porting, release-note work, or test planning:
 
-1. Identify the active repository and branch.
-2. Refresh the index when source or annotations may have changed:
+1. Discover the project context. If the project has `waymark.project.json`, run the read-only
+   bootstrap from the directory where the task starts:
 
 ```bash
-python3 .tools/index_code.py
+python3 .tools/workflow.py context --cwd . --task "<the request>"
 ```
 
-3. Run the integrity check and do not trust the KB if it fails:
+   Read the reported instruction files and identify the active repository, branch, related
+   repositories, authoritative knowledge roots, generated caches, tool documentation, and protected
+   paths. Report conflicts or missing required context instead of silently choosing one.
+
+2. Query the existing index before rebuilding it. If one exists, run its integrity check and do not
+   trust it if the check fails:
 
 ```bash
 python3 .tools/query_code_index.py selftest
 ```
 
-4. Query claims before reading source deeply, especially disproved hypotheses:
+   An index is a cache, not the knowledge source. Do **not** rebuild merely because files may have
+   changed. Rebuild only when it is missing, a branch/root mismatch or another check proves it stale,
+   a query misses knowledge that the source KB demonstrably contains, or after you author knowledge
+   or source changes that must be indexed.
+
+3. Query claims before reading source deeply, especially disproved hypotheses:
 
 ```bash
 python3 .tools/query_code_index.py claim <keywords> --dead-first
 ```
 
-5. Query annotations, comments, symbols, and references before re-deriving behavior:
+4. Query annotations, comments, symbols, and references before re-deriving behavior:
 
 ```bash
 python3 .tools/query_code_index.py annotation <keywords>
@@ -40,6 +50,15 @@ python3 .tools/query_code_index.py refs <name>
 ```
 
 Use `--full` before relying on details from a compact result.
+
+5. A KB miss is not proof that no precedent exists. Search in this order: instruction files,
+   project manifest, authoritative KB sources, task-specific tool documentation, cross-branch and
+   related-repository history, then product source. Before creating infrastructure or workflow,
+   check whether another maintained branch already contains it.
+
+6. If a user supplies a durable fact that should have been found during bootstrap, treat that as a
+   retrieval defect. Record the fact in the project KB or manifest and add a cold-session regression
+   that proves the next context can recover it without the same prompt.
 
 ## Record What You Learn
 

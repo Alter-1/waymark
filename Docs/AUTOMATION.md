@@ -5,6 +5,13 @@ drive letters, registry keys, or deployment targets. Machine paths belong in loc
 JSON files, excluded from version control. Plans use argument arrays, never shell
 command strings. Paths in a plan are relative to that plan's directory unless absolute.
 
+## Cold-session context
+
+`python .tools/workflow.py context --cwd . --task "request"` discovers
+`waymark.project.json` from the current directory upward and emits a read-only context receipt.
+It does not run configured tools or rebuild an index. The manifest format, canonical/satellite
+layout, validation rules, and limitations are documented in [`CONTEXT.md`](CONTEXT.md).
+
 ## Command plans and before/after probes
 
 Run `python .tools/workflow.py run workflow.local.json --out EVIDENCE_DIRECTORY`.

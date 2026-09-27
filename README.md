@@ -62,6 +62,21 @@ python3 .tools/query_code_index.py --full annotation walrus
 If you are about to change the engine, read that KB first. It exists because the alternative is
 re-deriving the same four bugs.
 
+### Starting in a repository family
+
+A task can span several checkouts while the current directory names only one. If the project has a
+`waymark.project.json`, take a read-only context receipt before rebuilding indexes or searching
+source:
+
+```bash
+python3 .tools/workflow.py context --cwd . --task "the request"
+```
+
+It reports repository identities, expected branches/upstreams, authoritative KB roots, generated
+index caches, applicable tool documentation, and intentionally protected paths. Satellite manifests
+can point to one canonical topology, so seven worktrees do not require seven copies. See
+[`Docs/CONTEXT.md`](Docs/CONTEXT.md).
+
 **Where does a knowledge base actually live?** It is a folder of markdown files, one per entry, and
 where that folder sits — beside your code, on a branch of its own, or in a separate repository — is
 your choice. If that is the question you came with, skip ahead to
@@ -689,6 +704,7 @@ Everything above is `query_code_index.py`. These are separate, and each answers 
 | `xstatus.py` | a cross-branch register: **why** a fix is absent from a branch — never ported, deliberately rejected, not applicable — which git has nowhere to record. See [`Docs/CROSS-BRANCH-REGISTER.md`](Docs/CROSS-BRANCH-REGISTER.md) |
 | `shared_paths.py` | are the directories you have DECLARED shared -- a toolset, an SDK, a test suite -- byte-identical on every branch? Compares git tree hashes and groups the branches that agree, so the report is "three agree, one differs" and names the files. BEST-PRACTICE section 8 states the rule; this is the instrument for it |
 | `css_factor.py` | which repeated CSS declarations can be folded into a selector list, **and whether that is safe**. Refuses any fold the cascade would change, and reports the refusals — usually the more interesting output |
+| `workflow.py` | read-only project context, evidence plans/snapshots, sparse worktrees, and explicit cross-repository comparison. See [`Docs/CONTEXT.md`](Docs/CONTEXT.md) and [`Docs/AUTOMATION.md`](Docs/AUTOMATION.md) |
 
 ## Handing work to the next context
 

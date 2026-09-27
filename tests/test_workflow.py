@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import os
 import shutil
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -79,6 +80,68 @@ class WorkflowTests(unittest.TestCase):
         out=self.root/'e';w.compare(p,out);report=json.loads((out/'comparison.json').read_text())
         self.assertEqual(report['items'][0]['targets']['target']['decision'],'review-required')
         self.assertEqual(report['items'][1]['targets']['target']['decision'],'will-not-port')
+
+    def test_context_discovers_satellite_and_does_not_rebuild_index(self):
+        source=self.repo('source'); target=self.repo('target')
+        for repo in (source,target):
+            (repo/'README.md').write_text('instructions')
+            w.git(repo,'add','.'); w.git(repo,'commit','-m','fixture')
+        branch=w.git(source,'branch','--show-current')
+        (source/'kb').mkdir(); (source/'kb'/'entry.md').write_text('knowledge')
+        (source/'tool.py').write_text('pass')
+        (source/'tool.md').write_text('tool docs')
+        (source/'protected').mkdir()
+        db=source/'index.sqlite'
+        con=sqlite3.connect(str(db)); con.execute('PRAGMA journal_mode=WAL')
+        con.execute('CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)')
+        con.executemany('INSERT INTO meta VALUES(?,?)', [('root',str(source)),('branch',branch),
+                        ('build_started_at','fixture'),('file_count','1'),('index_schema','test')])
+        con.commit(); con.close(); before=db.stat().st_mtime_ns
+        sidecars=[Path(str(db)+suffix) for suffix in ('-wal','-shm')]
+        self.assertFalse(any(path.exists() for path in sidecars))
+        manifest=source/'waymark.project.json'
+        manifest.write_text(json.dumps({
+            'schema_version':1, 'project':'fixture',
+            'repositories':[
+                {'id':'source','path':'.','role':'owner','branch':branch},
+                {'id':'target','path':'../target','role':'peer','branch':branch}],
+            'instructions':['README.md'],
+            'knowledge_roots':[{'path':'kb','authority':'source'}],
+            'indexes':[{'path':'index.sqlite','repository_id':'source','authority':'cache'}],
+            'tools':[{'path':'tool.py','documentation':'tool.md','cwd':'.','mutation':'read-only'}],
+            'protected_paths':[{'path':'protected','reason':'fixture guard'}]}))
+        (target/'waymark.project.json').write_text(json.dumps({
+            'schema_version':1, 'extends':str(manifest), 'repository_id':'target'}))
+        nested=target/'nested'; nested.mkdir()
+        report=w.project_context(cwd=nested,task='find prior work')
+        self.assertEqual(report['selected_repository'],'target')
+        self.assertEqual(report['manifest'],str(manifest))
+        self.assertEqual(report['task'],'find prior work')
+        self.assertTrue(report['read_only'])
+        self.assertFalse(report['errors'])
+        self.assertEqual(report['indexes'][0]['authority'],'cache')
+        self.assertEqual(report['indexes'][0]['status'],'present-unverified')
+        self.assertEqual(db.stat().st_mtime_ns,before)
+        self.assertFalse(any(path.exists() for path in sidecars))
+
+    def test_context_reports_branch_mismatch_and_missing_required_resource(self):
+        repo=self.repo('repo')
+        (repo/'seed').write_text('seed'); w.git(repo,'add','.'); w.git(repo,'commit','-m','fixture')
+        manifest=repo/'waymark.project.json'
+        manifest.write_text(json.dumps({'schema_version':1,'project':'fixture',
+            'repositories':[{'id':'repo','path':'.','branch':'not-the-current-branch'}],
+            'instructions':['missing.md']}))
+        report=w.project_context(manifest,cwd=repo)
+        self.assertEqual(len(report['errors']),2)
+        self.assertIn('branch is',report['errors'][0])
+        self.assertIn('instructions is missing',report['errors'][1])
+
+    def test_context_rejects_manifest_include_cycle(self):
+        one=self.root/'one.json'; two=self.root/'two.json'
+        one.write_text(json.dumps({'schema_version':1,'extends':'two.json'}))
+        two.write_text(json.dumps({'schema_version':1,'extends':'one.json'}))
+        with self.assertRaisesRegex(ValueError,'include cycle'):
+            w.load_context_manifest(one)
 
 
 if __name__ == '__main__': unittest.main()

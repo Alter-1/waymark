@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -38,6 +39,187 @@ def repo_state(repo):
     return {'path': str(repo), 'head': git(repo, 'rev-parse', 'HEAD'),
             'branch': git(repo, 'branch', '--show-current'),
             'status': git(repo, 'status', '--porcelain')}
+
+
+def discover_context_manifest(cwd, name='waymark.project.json'):
+    """Find project context without changing the repository or rebuilding an index."""
+    start = Path(cwd).resolve()
+    if start.is_file():
+        start = start.parent
+    for folder in (start,) + tuple(start.parents):
+        candidate = folder / name
+        if candidate.is_file():
+            return candidate
+    raise ValueError('No %s found from %s or its parents' % (name, start))
+
+
+def load_context_manifest(path, seen=None):
+    """Load one canonical manifest or a small satellite pointer to it."""
+    path = Path(path).resolve()
+    seen = set() if seen is None else seen
+    if path in seen:
+        raise ValueError('Context manifest include cycle at ' + str(path))
+    seen.add(path)
+    data = json.loads(path.read_text(encoding='utf-8-sig'))
+    if not isinstance(data, dict):
+        raise ValueError('Context manifest must be a JSON object: ' + str(path))
+    if 'extends' not in data:
+        return data, path
+    parent, canonical = load_context_manifest(absolute(data['extends'], path.parent), seen)
+    allowed = {'schema_version', 'extends', 'repository_id'}
+    extra = sorted(set(data) - allowed)
+    if extra:
+        raise ValueError('Satellite context manifest may only select repository_id; unexpected: ' + ', '.join(extra))
+    merged = dict(parent)
+    if data.get('repository_id'):
+        merged['repository_id'] = data['repository_id']
+    return merged, canonical
+
+
+def _resource_entries(items, base):
+    result = []
+    for raw in items:
+        item = {'path': raw} if isinstance(raw, str) else dict(raw)
+        if not item.get('path'):
+            raise ValueError('Context resource is missing path')
+        path = absolute(item['path'], base)
+        item['path'] = str(path)
+        item['exists'] = path.exists()
+        item['required'] = bool(item.get('required', True))
+        for field in ('documentation', 'cwd'):
+            if item.get(field):
+                item[field] = str(absolute(item[field], base))
+        result.append(item)
+    return result
+
+
+def _git_context(path):
+    try:
+        state = repo_state(path)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return {'error': str(exc)}
+    lines = [line for line in state.pop('status').splitlines() if line]
+    state['dirty'] = bool(lines)
+    state['status_count'] = len(lines)
+    state['status_preview'] = lines[:20]
+    try:
+        state['upstream'] = git(path, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
+    except (OSError, subprocess.CalledProcessError):
+        state['upstream'] = ''
+    return state
+
+
+def _index_context(item, repositories):
+    path = Path(item['path'])
+    result = dict(item)
+    result['authority'] = item.get('authority', 'cache')
+    result['status'] = 'missing' if not path.is_file() else 'present-unverified'
+    if not path.is_file():
+        return result
+    try:
+        # mode=ro can still create -wal/-shm lock sidecars for a WAL-mode database.  Context is a
+        # receipt, not an index session, so immutable is required to make the no-write contract
+        # true at the filesystem level as well.
+        con = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True)
+        try:
+            meta = dict(con.execute('SELECT key, value FROM meta'))
+        finally:
+            con.close()
+        result['meta'] = {key: meta.get(key, '') for key in
+                          ('root', 'branch', 'build_started_at', 'file_count', 'index_schema')}
+        repo_id = item.get('repository_id', '')
+        repo = repositories.get(repo_id)
+        if repo and repo.get('git') and not repo['git'].get('error'):
+            reasons = []
+            if meta.get('branch') and meta['branch'] != repo['git'].get('branch'):
+                reasons.append('index branch is %s; checkout branch is %s' %
+                               (meta['branch'], repo['git'].get('branch')))
+            if meta.get('root') and Path(meta['root']).resolve() != Path(repo['path']).resolve():
+                reasons.append('index root does not match repository path')
+            if reasons:
+                result['status'] = 'stale'
+                result['reasons'] = reasons
+    except (OSError, sqlite3.DatabaseError) as exc:
+        result['status'] = 'invalid'
+        result['error'] = str(exc)
+    return result
+
+
+def project_context(manifest=None, cwd='.', task=''):
+    """Return a read-only cold-session receipt for a repository family."""
+    entry = Path(manifest).resolve() if manifest else discover_context_manifest(cwd)
+    data, canonical = load_context_manifest(entry)
+    if data.get('schema_version') != 1:
+        raise ValueError('Unsupported context schema_version (expected 1)')
+    if not data.get('project'):
+        raise ValueError('Context manifest is missing project')
+    specs = data.get('repositories', [])
+    if not isinstance(specs, list) or not specs:
+        raise ValueError('Context manifest needs a nonempty repositories array')
+    ids = [item.get('id') for item in specs if isinstance(item, dict)]
+    if any(not value for value in ids) or len(ids) != len(specs) or len(set(ids)) != len(ids):
+        raise ValueError('Every repository needs a unique nonempty id')
+
+    base = canonical.parent
+    repositories = {}
+    errors = []
+    for spec in specs:
+        item = dict(spec)
+        path = absolute(item.pop('path'), base)
+        item['path'] = str(path)
+        item['exists'] = path.exists()
+        item['required'] = bool(item.get('required', True))
+        if item['exists']:
+            item['git'] = _git_context(path)
+            if item['git'].get('error'):
+                errors.append('%s is not a readable Git checkout' % item['id'])
+            if item.get('branch') and item['git'].get('branch') != item['branch']:
+                errors.append('%s branch is %s, expected %s' %
+                              (item['id'], item['git'].get('branch'), item['branch']))
+            if item.get('upstream') and item['git'].get('upstream') != item['upstream']:
+                errors.append('%s upstream is %s, expected %s' %
+                              (item['id'], item['git'].get('upstream') or '(none)', item['upstream']))
+        elif item['required']:
+            errors.append('%s repository is missing: %s' % (item['id'], path))
+        repositories[item['id']] = item
+
+    selected = data.get('repository_id', '')
+    if selected and selected not in repositories:
+        raise ValueError('repository_id is not present in repositories: ' + selected)
+    if not selected:
+        here = Path(cwd).resolve()
+        candidates = [item for item in repositories.values()
+                      if item['exists'] and (here == Path(item['path']) or Path(item['path']) in here.parents)]
+        if candidates:
+            selected = max(candidates, key=lambda item: len(Path(item['path']).parts))['id']
+
+    resources = {}
+    for key in ('instructions', 'knowledge_roots', 'tools', 'protected_paths', 'indexes'):
+        resources[key] = _resource_entries(data.get(key, []), base)
+        for item in resources[key]:
+            if item['required'] and not item['exists']:
+                errors.append('%s is missing: %s' % (key, item['path']))
+    resources['indexes'] = [_index_context(item, repositories) for item in resources['indexes']]
+
+    return {
+        'schema_version': 1,
+        'project': data['project'],
+        'task': task,
+        'entry_manifest': str(entry),
+        'manifest': str(canonical),
+        'selected_repository': selected,
+        'repositories': [repositories[key] for key in ids],
+        'instructions': resources['instructions'],
+        'knowledge_roots': resources['knowledge_roots'],
+        'indexes': resources['indexes'],
+        'tools': resources['tools'],
+        'protected_paths': resources['protected_paths'],
+        'retrieval_order': ['instructions', 'project manifest', 'knowledge sources',
+                            'tool documentation', 'cross-branch history', 'source'],
+        'index_policy': 'Query an existing index first. Rebuild only when missing, proven stale, or after authored knowledge/source changes that must be indexed.',
+        'read_only': True,
+        'errors': errors,
+    }
 
 
 def new_evidence(path):
@@ -209,11 +391,22 @@ def main():
     p = sub.add_parser('worktree'); p.add_argument('--repo', required=True); p.add_argument('--dest', required=True)
     p.add_argument('--ref', required=True); p.add_argument('--branch', required=True)
     p.add_argument('--include', action='append', required=True); p.add_argument('--exclude', action='append', default=[])
+    p = sub.add_parser('context')
+    p.add_argument('--manifest', help='Manifest path; otherwise discover waymark.project.json from --cwd')
+    p.add_argument('--cwd', default='.', help='Current project path used for discovery and repository selection')
+    p.add_argument('--task', default='', help='Task text retained in the context receipt')
+    p.add_argument('--out', help='Optional JSON receipt path; stdout is always written')
     args = parser.parse_args()
     try:
         if args.command == 'run': return run_plan(args.config, args.out, args.resume)
         if args.command == 'snapshot': return snapshot(args.config, args.out)
         if args.command == 'compare': return compare(args.config, args.out)
+        if args.command == 'context':
+            report = project_context(args.manifest, args.cwd, args.task)
+            if args.out:
+                write_json(Path(args.out).resolve(), report)
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+            return 1 if report['errors'] else 0
         print(json.dumps(sparse_worktree(args.repo, args.dest, args.ref, args.branch, args.include, args.exclude), indent=2))
         return 0
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
