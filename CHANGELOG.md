@@ -5,6 +5,25 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-27
+
+### Added
+* **Read-only cold-session context for repository families.** `workflow.py context` discovers a
+  generic `waymark.project.json`, validates declared checkouts and required resources, distinguishes
+  authoritative knowledge from generated index caches, and reports tool documentation and protected
+  paths before work begins. Small satellite manifests select one repository from a canonical
+  topology rather than copying it into every worktree.
+* Agent guidance now says **query before rebuild**. An index is rebuilt only when missing, proven
+  stale, or after authored changes that need indexing. A KB miss falls through to task-tool docs and
+  cross-branch history before source or a newly invented workflow; a user-supplied durable fact
+  becomes a retrieval regression rather than another fact to forget next session.
+
+### Fixed
+* Regression suites now clear read-only Git objects from their own temporary directories on
+  Windows instead of failing after their assertions pass.
+* The engine regression suite now uses the indexer's `detached` database name during detached-head
+  CI checkouts instead of looking for a nonexistent `code_index.HEAD.sqlite`.
+
 ## 2026-09-20
 
 ### Added
@@ -115,7 +134,6 @@ getting; the commit messages carry the reasoning and the measurements behind the
 
   The `comment:` and `arch:` link lookups still use unescaped `%term%`, deliberately: those are
   substring searches by design, not identifier resolution.
-
 ## 2026-09-10 (later)
 
 ### Added
