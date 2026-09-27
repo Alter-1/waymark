@@ -66,6 +66,12 @@ Use `--full` before relying on details from a compact result.
    listed as `diagnostic_only` may collect evidence but do not substitute for the canonical action.
    Verify the procedure's declared success artifacts or markers before reporting completion.
 
+8. Execute a documented command from its declared working directory and preserve its argv rather
+   than reconstructing a shell string. Run a state-changing command and its verifier as separate
+   invocations: if verification is misconfigured or fails, the receipt must still make clear that
+   the mutation already happened. Label an intentional negative-control failure as expected before
+   running it; do not present it like an operational error.
+
 ## Record What You Learn
 
 When you learn a durable fact, update the project KB annotations and rebuild the index. Record:
