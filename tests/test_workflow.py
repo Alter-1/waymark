@@ -136,6 +136,32 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('branch is',report['errors'][0])
         self.assertIn('instructions is missing',report['errors'][1])
 
+    def test_context_retrieves_canonical_procedure_for_exact_action(self):
+        repo=self.repo('repo')
+        (repo/'seed').write_text('seed'); w.git(repo,'add','.'); w.git(repo,'commit','-m','fixture')
+        manifest=repo/'waymark.project.json'
+        manifest.write_text(json.dumps({'schema_version':1,'project':'fixture',
+            'repositories':[{'id':'repo','path':'.'}],
+            'procedures':[{
+                'id':'release-build',
+                'triggers':['build release','release build'],
+                'repository_ids':['repo'],
+                'canonical':{'argv':['tools/build.cmd','Release'],'cwd':'repository'},
+                'diagnostic_only':[{'argv':['python','tools/probe.py'],'reason':'isolated evidence only'}],
+                'success':{'artifacts':['bin/Release/app.exe'],'markers':['build.ok']}
+            }]}))
+        report=w.project_context(manifest,cwd=repo,task='Please run the release build now')
+        self.assertEqual([p['id'] for p in report['relevant_procedures']],['release-build'])
+        procedure=report['relevant_procedures'][0]
+        self.assertEqual(procedure['canonical']['argv'],['tools/build.cmd','Release'])
+        self.assertEqual(procedure['canonical']['cwd'],'repository')
+        self.assertIn('diagnostic_only',procedure)
+        self.assertEqual(report['action_policy'],
+                         'At an action boundary, use the matching canonical procedure and verify its declared success evidence.')
+
+        unrelated=w.project_context(manifest,cwd=repo,task='inspect a source symbol')
+        self.assertEqual(unrelated['relevant_procedures'],[])
+
     def test_context_rejects_manifest_include_cycle(self):
         one=self.root/'one.json'; two=self.root/'two.json'
         one.write_text(json.dumps({'schema_version':1,'extends':'two.json'}))

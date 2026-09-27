@@ -93,6 +93,47 @@ def _resource_entries(items, base):
     return result
 
 
+def _procedure_entries(items, repository_ids, selected_repository, task):
+    """Validate action procedures and select the ones named by the current task."""
+    if not isinstance(items, list):
+        raise ValueError('Context procedures must be an array')
+    result = []
+    ids = set()
+    task_text = task.casefold()
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise ValueError('Every context procedure must be an object')
+        item = dict(raw)
+        procedure_id = item.get('id')
+        if not procedure_id or procedure_id in ids:
+            raise ValueError('Every procedure needs a unique nonempty id')
+        ids.add(procedure_id)
+        triggers = item.get('triggers', [])
+        if not isinstance(triggers, list) or not triggers or not all(isinstance(value, str) and value.strip() for value in triggers):
+            raise ValueError('Procedure %s needs nonempty string triggers' % procedure_id)
+        targets = item.get('repository_ids', [])
+        if not isinstance(targets, list) or not all(value in repository_ids for value in targets):
+            raise ValueError('Procedure %s names an unknown repository_id' % procedure_id)
+        canonical = item.get('canonical', {})
+        argv = canonical.get('argv') if isinstance(canonical, dict) else None
+        if not isinstance(argv, list) or not argv or not all(isinstance(value, str) for value in argv):
+            raise ValueError('Procedure %s canonical.argv must be a nonempty string array' % procedure_id)
+        if canonical.get('cwd') != 'repository':
+            raise ValueError('Procedure %s canonical.cwd must be repository' % procedure_id)
+        alternatives = item.get('diagnostic_only', [])
+        if not isinstance(alternatives, list):
+            raise ValueError('Procedure %s diagnostic_only must be an array' % procedure_id)
+        for alternative in alternatives:
+            alt_argv = alternative.get('argv') if isinstance(alternative, dict) else None
+            if (not isinstance(alt_argv, list) or not alt_argv or
+                    not all(isinstance(value, str) for value in alt_argv) or not alternative.get('reason')):
+                raise ValueError('Procedure %s diagnostic_only entries need argv and reason' % procedure_id)
+        item['matches_task'] = bool(task_text and any(trigger.casefold() in task_text for trigger in triggers))
+        item['matches_repository'] = not targets or selected_repository in targets
+        result.append(item)
+    return result
+
+
 def _git_context(path):
     try:
         state = repo_state(path)
@@ -200,6 +241,7 @@ def project_context(manifest=None, cwd='.', task=''):
             if item['required'] and not item['exists']:
                 errors.append('%s is missing: %s' % (key, item['path']))
     resources['indexes'] = [_index_context(item, repositories) for item in resources['indexes']]
+    procedures = _procedure_entries(data.get('procedures', []), set(repositories), selected, task)
 
     return {
         'schema_version': 1,
@@ -214,9 +256,13 @@ def project_context(manifest=None, cwd='.', task=''):
         'indexes': resources['indexes'],
         'tools': resources['tools'],
         'protected_paths': resources['protected_paths'],
+        'procedures': procedures,
+        'relevant_procedures': [item for item in procedures
+                                if item['matches_task'] and item['matches_repository']],
         'retrieval_order': ['instructions', 'project manifest', 'knowledge sources',
                             'tool documentation', 'cross-branch history', 'source'],
         'index_policy': 'Query an existing index first. Rebuild only when missing, proven stale, or after authored knowledge/source changes that must be indexed.',
+        'action_policy': 'At an action boundary, use the matching canonical procedure and verify its declared success evidence.',
         'read_only': True,
         'errors': errors,
     }

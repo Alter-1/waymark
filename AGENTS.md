@@ -60,6 +60,12 @@ Use `--full` before relying on details from a compact result.
    retrieval defect. Record the fact in the project KB or manifest and add a cold-session regression
    that proves the next context can recover it without the same prompt.
 
+7. Re-run the read-only context receipt at a meaningful action boundary such as build, test,
+   package, deploy, or release, retaining the exact requested action in `--task`. If the receipt
+   returns a matching `relevant_procedures` entry, its canonical argv/cwd is mandatory. Commands
+   listed as `diagnostic_only` may collect evidence but do not substitute for the canonical action.
+   Verify the procedure's declared success artifacts or markers before reporting completion.
+
 ## Record What You Learn
 
 When you learn a durable fact, update the project KB annotations and rebuild the index. Record:
