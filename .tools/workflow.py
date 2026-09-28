@@ -257,12 +257,19 @@ def project_context(manifest=None, cwd='.', task=''):
         'tools': resources['tools'],
         'protected_paths': resources['protected_paths'],
         'procedures': procedures,
+        # WHAT THE AGENT OWES IS KEYED TO THE REPOSITORY, NOT TO ITS OWN WORDING OF THE TASK.
+        # `relevant_procedures` is matched by substring against task text the CALLER writes, so a
+        # paraphrase ("build the firmware" against a trigger "release build") returns an empty list
+        # -- and an empty list reads as permission at exactly the boundary this exists to guard.
+        # `applicable_procedures` drops the task from the test: these are the declarations that own
+        # actions in the selected checkout, whatever the request was called. Matching still ranks.
+        'applicable_procedures': [item for item in procedures if item['matches_repository']],
         'relevant_procedures': [item for item in procedures
                                 if item['matches_task'] and item['matches_repository']],
         'retrieval_order': ['instructions', 'project manifest', 'knowledge sources',
                             'tool documentation', 'cross-branch history', 'source'],
         'index_policy': 'Query an existing index first. Rebuild only when missing, proven stale, or after authored knowledge/source changes that must be indexed.',
-        'action_policy': 'At an action boundary, use the matching canonical procedure and verify its declared success evidence.',
+        'action_policy': 'At an action boundary, a canonical procedure in applicable_procedures owns that action: use its argv/cwd and verify its declared success evidence. relevant_procedures ranks them against the task text and is a hint, not the obligation -- an empty list is not permission.',
         'read_only': True,
         'errors': errors,
     }
@@ -440,7 +447,10 @@ def main():
     p = sub.add_parser('context')
     p.add_argument('--manifest', help='Manifest path; otherwise discover waymark.project.json from --cwd')
     p.add_argument('--cwd', default='.', help='Current project path used for discovery and repository selection')
-    p.add_argument('--task', default='', help='Task text retained in the context receipt')
+    # REQUIRED: the default of '' made every matches_task false, so the cheapest possible
+    # invocation returned an empty relevant_procedures and satisfied the action rule vacuously,
+    # silently, and with exit code 0. A missing task is now a usage error.
+    p.add_argument('--task', required=True, help='The exact request, retained in the receipt and used to rank procedures')
     p.add_argument('--out', help='Optional JSON receipt path; stdout is always written')
     args = parser.parse_args()
     try:

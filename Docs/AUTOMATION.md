@@ -96,3 +96,27 @@ an existing helper over duplicating it. Record the observed friction, chosen cha
 failure-case validation, and whether the next real use removed time, steps or errors.
 
 Validation: `python -m unittest discover -s tests -p test_workflow.py -v`.
+
+## Reviewing the workflow itself
+
+Moved here out of `AGENTS.md`. It is good guidance and it is the reasoning behind the tools on this
+page -- but as an agent rule it had no trigger anybody could evaluate and no way to notice it had
+been skipped, while occupying space in a file whose other rules do have exit codes behind them.
+
+At meaningful milestones, after repeated friction or an avoidable failure, and before completing a
+substantial task, review how the work is being done. Do not interrupt a live debugging step merely
+to run this review; record an observation and revisit it at the next natural checkpoint.
+
+Look for repeated commands, manual bookkeeping, slow or excessive output, duplicated test setup,
+environment assumptions, and mistakes that a check could prevent. Decide whether to simplify the
+procedure, improve an existing tool, add reusable automation, document a rule, or leave it manual.
+Prefer small improvements justified by observed repetition or risk; do not build a framework for
+a one-off operation. Review outcomes and remaining opportunities belong in the KB.
+
+Separate public, project-neutral helpers from project-specific workflows. Keep machine paths and
+environment-specific values in ignored local settings, with portable example templates. Reuse
+existing tools before adding another one. Validate failure and recovery behavior as well as success;
+automation must retain evidence and must not equate a successful command with verified behavior.
+Implement improvements already within the user's authorized scope. Record larger changes for
+review rather than silently expanding the task. Measure whether an improvement actually removes
+steps, time, or errors when it is next used.

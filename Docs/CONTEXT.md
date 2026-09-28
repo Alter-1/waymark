@@ -15,6 +15,28 @@ Add `--out context.json` for a durable receipt. A required missing path, branch 
 mismatch is reported in `errors` and makes the CLI exit nonzero. Dirty repositories are information,
 not an error; the receipt gives a count and at most twenty preview lines.
 
+## Trust
+
+*** A MANIFEST IS EXACTLY AS TRUSTED AS THE REPOSITORY IT SITS IN, AND NO MORE. *** Discovery walks
+UPWARD from `--cwd` and takes the first `waymark.project.json` it finds, so the file that wins may
+belong to a parent directory rather than to the checkout you have in mind; a satellite's `extends`
+resolves to any path on disk. The receipt names the file it used in `entry_manifest` and `manifest`,
+and an agent following these rules should say which one it obeyed.
+
+This matters because a manifest is not inert. `procedures` declare argv that agent rules treat as
+owning an action, and `run_plan` executes argv arrays directly. Clone an unfamiliar repository, start
+an agent inside it, and its manifest can name the commands that agent is told to use. Nothing here is
+sandboxed and nothing tries to be.
+
+`context` itself does not execute `canonical.argv`; it reads. But reading is not nothing: it runs
+`git` inside each declared repository path, and git reads that repository's own configuration; it
+opens declared SQLite indexes, which means parsing files the manifest chose. Both are ordinary,
+bounded operations on paths somebody else may have written down.
+
+So: **read a manifest before acting on it in a repository you do not control**, exactly as you would
+read a `Makefile` before running `make`. In a repository family you maintain, this is a non-issue --
+which is the case the feature was built for.
+
 ## Canonical manifest
 
 Paths are relative to the canonical manifest unless absolute. Machine-specific manifests may be

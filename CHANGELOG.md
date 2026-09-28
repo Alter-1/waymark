@@ -13,6 +13,12 @@ getting; the commit messages carry the reasoning and the measurements behind the
   authoritative knowledge from generated index caches, and reports tool documentation and protected
   paths before work begins. Small satellite manifests select one repository from a canonical
   topology rather than copying it into every worktree.
+* **An action boundary's obligation no longer depends on how the agent worded the task.** A
+  procedure that applies to the checkout owns its action; trigger matching only ranks. `--task` is
+  now required, because its empty default used to satisfy the rule vacuously and exit 0.
+* **`Docs/CONTEXT.md` states a trust model.** A manifest is as trusted as the repository holding it:
+  discovery walks upward, `extends` reaches anywhere, and declared `procedures` name commands agent
+  rules treat as owning an action. Read one before acting on it in a repository you do not control.
 * Agent guidance now says **query before rebuild**. An index is rebuilt only when missing, proven
   stale, or after authored changes that need indexing. A KB miss falls through to task-tool docs and
   cross-branch history before source or a newly invented workflow; a user-supplied durable fact
