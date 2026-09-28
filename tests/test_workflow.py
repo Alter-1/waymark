@@ -156,11 +156,35 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(procedure['canonical']['argv'],['tools/build.cmd','Release'])
         self.assertEqual(procedure['canonical']['cwd'],'repository')
         self.assertIn('diagnostic_only',procedure)
-        self.assertEqual(report['action_policy'],
-                         'At an action boundary, use the matching canonical procedure and verify its declared success evidence.')
+        self.assertIn('an empty list is not permission',report['action_policy'])
 
         unrelated=w.project_context(manifest,cwd=repo,task='inspect a source symbol')
         self.assertEqual(unrelated['relevant_procedures'],[])
+
+    def test_context_paraphrased_task_still_owes_the_procedure(self):
+        # THE POINT OF THE FEATURE IS THE BOUNDARY IT GUARDS, AND A PARAPHRASE MUST NOT OPEN IT.
+        # 'triggers' are matched by substring against task text the caller writes about itself, so
+        # wording the same request differently empties relevant_procedures -- and an empty list at a
+        # build boundary reads as "nothing owns this, use your judgement", which is the failure.
+        # applicable_procedures answers the question the boundary actually asks: what owns an action
+        # in THIS checkout. An empty --task cannot disarm it either.
+        repo=self.repo('repo')
+        (repo/'seed').write_text('seed'); w.git(repo,'add','.'); w.git(repo,'commit','-m','fixture')
+        manifest=repo/'waymark.project.json'
+        manifest.write_text(json.dumps({'schema_version':1,'project':'fixture',
+            'repositories':[{'id':'repo','path':'.'},{'id':'other','path':'.'}],
+            'procedures':[
+                {'id':'release-build','triggers':['release build'],'repository_ids':['repo'],
+                 'canonical':{'argv':['tools/build.cmd','Release'],'cwd':'repository'}},
+                {'id':'elsewhere','triggers':['release build'],'repository_ids':['other'],
+                 'canonical':{'argv':['tools/other.cmd'],'cwd':'repository'}},
+            ]}))
+        for task in ('go and build the firmware now',''):
+            report=w.project_context(manifest,cwd=repo,task=task)
+            self.assertEqual(report['relevant_procedures'],[],task)         # the wording missed
+            self.assertEqual([p['id'] for p in report['applicable_procedures']],['release-build'],task)
+            self.assertEqual(report['applicable_procedures'][0]['canonical']['argv'],
+                             ['tools/build.cmd','Release'],task)
 
     def test_context_rejects_manifest_include_cycle(self):
         one=self.root/'one.json'; two=self.root/'two.json'
