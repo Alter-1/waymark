@@ -8,6 +8,15 @@ getting; the commit messages carry the reasoning and the measurements behind the
 ## 2026-09-29
 
 ### Added
+* **`verify_port.py --commit SHA` -- verify named commits, with no date arithmetic.** Chasing one
+  fix meant inventing a date range around it, and the two ways that goes wrong were both hit within
+  an hour. `--since` is a git *approxidate*, and approxidate never fails: given a revision it means
+  "no bound at all", so `--since=<sha>^` asked for 5218 commits instead of one and the run had to be
+  killed, with nothing in git's output saying the bound was ignored. That is now refused, by name,
+  pointing at `--commit`. And a date bound is read in LOCAL time, so `--since=<the day a commit is
+  dated>` can exclude that very commit when its own timezone puts it before local midnight -- which
+  it did, silently returning an empty table. Both are documented in `--help` where they bite.
+
 * **`verify_port.py` -- a `+PROSE` cell, for the port that was ADAPTED and renamed.** The tool picks
   distinctive identifiers out of a commit and greps the target branches for them, on the stated
   assumption that adaptation "does not usually rename the identifier the fix turns on". Measured on a

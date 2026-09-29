@@ -280,6 +280,15 @@ def prose_in_ref(repo, ref, phrases, exts, skip):
     return hits
 
 
+def _looks_like_rev(repo, value):
+    """Does this string resolve as a git revision? Used to catch it being passed to --since."""
+    try:
+        return subprocess.call(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "%s^{commit}" % value],
+                               stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT) == 0
+    except Exception:
+        return False
+
+
 def present_in(tree, token, exts=None):
     """grep -rqF across the tree, restricted to the file types the COMMIT touched.
 
@@ -522,8 +531,16 @@ def classify(hits, total):
 def main():
     p = argparse.ArgumentParser(description="content-based port verification (NOT patch identity)")
     p.add_argument("--repo", required=True, help="repo to read commits FROM")
-    p.add_argument("--rev", required=True, help="e.g. origin/customer-fork")
-    p.add_argument("--since", required=True)
+    p.add_argument("--rev", help="branch to read commits from, e.g. origin/customer-fork "
+                                "(with --since; not needed when --commit names them)")
+    p.add_argument("--since", help="DATE for git log, e.g. 2026-09-01 or '3 weeks ago'. "
+                                   "NOT a revision -- see --commit. Beware that a date bound is "
+                                   "read in LOCAL time, so --since=<the day a commit is dated> can "
+                                   "exclude that commit if its own timezone puts it before local "
+                                   "midnight; give the day before.")
+    p.add_argument("--commit", action="append", default=[], metavar="SHA",
+                   help="verify exactly this commit, repeatable. No date arithmetic, no timezone "
+                        "edge, and it is what you want when chasing one fix.")
     p.add_argument("--target", action="append", default=[],
                    help="name=path of a working tree to search, repeatable")
     p.add_argument("--ref", action="append", default=[],
@@ -562,8 +579,29 @@ def main():
         sys.stderr.write("give at least one --ref or --target\n")
         sys.exit(2)
 
-    log = sh(["git", "-C", a.repo, "log", "--no-merges", "--format=%H%x01%ad%x01%s",
-              "--date=short", "--since=%s" % a.since, a.rev])
+    # *** A REVISION PASSED TO --since IS ACCEPTED BY GIT AND MEANS "EVERYTHING". ***
+    # `--since` is an approxidate, and approxidate does not fail: measured 2026-09-29,
+    # `git log --since=<sha>^` returned 5218 commits instead of one, so the tool set about verifying
+    # the entire history and had to be killed. Nothing in git's output says the bound was ignored.
+    # Refuse it here and name the option that was actually wanted.
+    if a.since and _looks_like_rev(a.repo, a.since):
+        sys.stderr.write(
+            "--since=%r resolves as a REVISION, and git would silently treat it as no bound at all\n"
+            "(measured: 5218 commits instead of 1). --since takes a DATE. To verify one commit:\n"
+            "    --commit %s\n" % (a.since, a.since))
+        return 2
+    if a.commit:
+        if a.since or a.rev:
+            sys.stderr.write("--commit names the commits outright; --rev/--since are for a range\n")
+            return 2
+        fmt = ["git", "-C", a.repo, "show", "-s", "--format=%H%x01%ad%x01%s", "--date=short"]
+        log = "\n".join(sh(fmt + [c]).strip() for c in a.commit)
+    else:
+        if not (a.rev and a.since):
+            sys.stderr.write("give either --commit SHA... or both --rev and --since\n")
+            return 2
+        log = sh(["git", "-C", a.repo, "log", "--no-merges", "--format=%H%x01%ad%x01%s",
+                  "--date=short", "--since=%s" % a.since, a.rev])
     rows = []
     for line in log.splitlines():
         parts = line.split("\x01")
@@ -571,7 +609,7 @@ def main():
             continue
         sha, date, subj = parts
         toks, exts = ([], set()) if a.no_tokens else tokens_for(a.repo, sha)
-        old, old_exts, old_by_path = old_lines_for(a.repo, sha, skip, a.min_line, tip=a.rev)
+        old, old_exts, old_by_path = old_lines_for(a.repo, sha, skip, a.min_line, tip=a.rev or sha)
         # Extracted lazily: only a cell that came back absent/no-tokens asks for it.
         prose = None
         res = {}
