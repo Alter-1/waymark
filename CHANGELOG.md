@@ -7,6 +7,17 @@ getting; the commit messages carry the reasoning and the measurements behind the
 
 ## 2026-09-29
 
+### Changed
+* **`verify_port.py` is fast enough to run on a real audit.** It used one `git grep` per token per
+  branch, plus one per token against the parent -- about forty subprocesses per commit. Auditing
+  twelve commits across three branches of a large repository blew a ten-minute timeout and had to be
+  split into four parallel batches to finish at all, and *a tool nobody can afford to run does not
+  get run* -- the question then gets answered by hand, which is the failure this file exists to
+  prevent. The token pass and the parent filter are now one batched `git grep -f` each. Same
+  semantics deliberately: the token pass still counts a token wherever it appears, comments included,
+  and the parent filter still searches the whole parent tree with no extension restriction. Verified
+  by scoring the same commits before and after and getting identical cells.
+
 ### Added
 * **`verify_port.py --commit SHA` -- verify named commits, with no date arithmetic.** Chasing one
   fix meant inventing a date range around it, and the two ways that goes wrong were both hit within

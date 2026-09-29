@@ -136,9 +136,12 @@ def tokens_for(repo, sha, max_tokens=6):
     # there when hand verification showed the guard is absent. Every fix that GUARDS or WRAPS
     # existing code failed the same way, and the failure direction is the dangerous one: a false
     # "present" hides a real gap.
+    # ONE grep for every candidate instead of one per candidate. The ORDER and the cap are kept,
+    # so the tokens chosen are the same ones -- see tokens_found_in_ref() for why speed matters here.
+    inherited = _in_parent_bulk(repo, sha, uniq)
     keep = []
     for t in uniq:
-        if not _in_parent(repo, sha, t):
+        if t not in inherited:
             keep.append(t)
         if len(keep) >= max_tokens:
             break
@@ -257,7 +260,8 @@ def prose_for(repo, sha, max_phrases=4):
         if len(uniq) >= max_phrases * 3:
             break
     # A phrase already in the parent tree says nothing -- same rule as the code tokens.
-    out = [p for p in uniq if not _in_parent(repo, sha, p)]
+    inherited = _in_parent_bulk(repo, sha, uniq)
+    out = [p for p in uniq if p not in inherited]
     return out[:max_phrases], exts
 
 
@@ -392,7 +396,7 @@ def _is_comment(body, ext):
     return body.startswith("#") and (ext in HASH_COMMENT_EXTS or ext == "")
 
 
-def _grep_found(repo, rev, patterns, exts, skip, paths=None):
+def _grep_found(repo, rev, patterns, exts, skip, paths=None, skip_comments=True):
     """Which of these fixed strings occur anywhere in `rev` (a commit or ref), in files of the given
     types, outside paths matching `skip`? One `git grep -f` for the lot.
 
@@ -426,7 +430,9 @@ def _grep_found(repo, rev, patterns, exts, skip, paths=None):
         if not sep:
             continue
         stripped = body.strip()
-        if _is_comment(stripped, os.path.splitext(fpath)[1]):
+        # skip_comments=False is the TOKEN pass, which has always counted a token wherever it appears.
+        # Kept deliberately: changing that would move scores, and this commit only changes SPEED.
+        if skip_comments and _is_comment(stripped, os.path.splitext(fpath)[1]):
             continue
         for pat in patterns:
             if pat in body:
@@ -491,6 +497,35 @@ def present_in_ref(repo, ref, token, exts=None):
         return subprocess.call(cmd, stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT) == 0
     except Exception:
         return False
+
+
+def tokens_found_in_ref(repo, ref, tokens, exts):
+    """present_in_ref() for EVERY token in ONE git grep instead of one grep per token.
+
+    *** WHY THIS EXISTS: THE TOOL WAS TOO SLOW TO BE USED ON THE QUESTION IT IS FOR. *** Measured
+    2026-09-29 auditing twelve power commits across three branches: one grep per token per ref, plus
+    one per token against the parent, is ~40 subprocess git greps per commit. On a large repository
+    that is minutes per commit -- the twelve-commit run blew a 590-second timeout and had to be split
+    into four parallel batches to finish at all. A tool nobody can afford to run does not get run,
+    and then the question gets answered by hand and answered wrong, which is the whole reason this
+    file exists.
+
+    Same semantics as the loop it replaces: a token counts wherever it appears, comments included
+    (skip_comments=False). Only the number of processes changes."""
+    if not tokens:
+        return set()
+    return _grep_found(repo, ref, list(tokens), exts, None, skip_comments=False)
+
+
+def _in_parent_bulk(repo, sha, tokens):
+    """Which of these tokens already existed in the tree BEFORE the commit? One grep, not N.
+
+    exts is deliberately NOT passed: _in_parent(), which this replaces, greps the WHOLE parent tree
+    with no extension restriction. Narrowing it here would let a token that exists in a file type the
+    commit did not touch slip through the filter and be scored as distinctive."""
+    if not tokens:
+        return set()
+    return _grep_found(repo, "%s^" % sha, list(tokens), None, None, skip_comments=False)
 
 
 def old_hits_in_ref(repo, ref, by_path, exts, skip, cache=None):
@@ -618,7 +653,7 @@ def main():
                 res[name] = ("in-history", 0, 0, 0, 0)
                 continue
             if kind == "ref":
-                hits = sum(1 for t in toks if present_in_ref(a.repo, where, t, exts))
+                hits = len(tokens_found_in_ref(a.repo, where, toks, exts))
                 old_hits = old_hits_in_ref(a.repo, where, old_by_path, old_exts, skip)
             else:
                 hits = sum(1 for t in toks if present_in(where, t, exts))
