@@ -348,6 +348,52 @@ None of this closes the gap. You cannot validate a definition you have not finis
 only keep its edges visible and keep a second source in play. A procedure that promised completeness
 here would be the same overconfidence wearing a new costume.
 
+
+### Six questions to ask an instrument before believing it
+
+The section above is the deepest case. This is the practical one, and it comes from counting: in one
+day's work on a four-branch firmware tree, **eleven conclusions were wrong because an instrument
+lied, and almost nothing was wrong with the firmware.** The system under test was healthier than the
+tools watching it. That ratio is the reason this section exists — debugging effort goes to the
+instruments, and it is rarely budgeted there.
+
+Ask these before trusting a reading. Each one is a real failure, not a hypothetical:
+
+1. **Is it measuring the quantity I asked about?** `git merge-base --is-ancestor` reported a fix "not
+   ported" to three branches that had it — it measures shared *history*, and the question was
+   *content*. A grep for the function name said the same, because the port was adapted and renamed:
+   a symbol is not a behaviour. And `ssh -T host` answered *Welcome* while the operation that
+   followed could not connect at all, because it opened a different connection than the one tested.
+2. **Could a zero mean "cannot see" rather than "not there"?** A metric that needs incoming traffic
+   cannot prove a fault that *stops* the traffic — it reads 0 on the broken build and the fixed one
+   alike. Before believing a zero, check the instrument's input existed in the state under test.
+3. **Am I judging it against the right baseline?** A port dropped packets in 62 of 91 seconds and the
+   check called every one a fault. The drops were *designed* — that port drops while it waits for a
+   shared line. The measurement was correct and the threshold was fiction.
+4. **Did a constraint I imposed silently not apply — or silently become the answer?** `--since=<a
+   revision>` was accepted by an approxidate parser as *no bound at all*, so a one-commit query
+   enumerated five thousand. And `head -5` on a range answers the question "what are the first five",
+   which is never the question. A cap read as data measures the cap.
+5. **Does this output look the same in two different worlds?** A dry-run push prints byte-identical
+   lines to a real one. If the same text can mean "published" and "did not publish", the text is not
+   evidence — go and look at the far end.
+6. **Does it have standing to answer at all?** A port-verification tool scored branches that do not
+   contain the file in question, and the tokens matched elsewhere, so it invented a port into a target
+   that could not receive one. An instrument asked an inapplicable question should say *not
+   applicable*, never a score.
+
+And a seventh that no question catches: **a plain bug whose output is in range.** A record counter
+reported about one per second against a real two hundred, because the pattern was line-anchored and
+the records arrive concatenated. Nothing looked wrong — 1 is a number. The only defence is an
+order-of-magnitude expectation derived from the domain before reading the result.
+
+**On the honesty of this list:** three of those shapes are attested by more than one case and four by
+exactly one, so the taxonomy is close to over-fitted and some of them will collapse into each other
+with more evidence. Treat the *questions* as the durable part and the categories as scaffolding. The
+one generalisation worth keeping is the direction of the danger: of the eleven, the two most expensive
+were both *confident and wrong in the reassuring direction* — a false "present" and a false "absent" —
+because those are the answers you stop reading at.
+
 ---
 
 ### A refusal that leaves the refused value in force is not a refusal
