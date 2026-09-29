@@ -284,6 +284,39 @@ def prose_in_ref(repo, ref, phrases, exts, skip):
     return hits
 
 
+def paths_touched(repo, sha):
+    """The files this commit changed, minus the ones whose presence says nothing about a fix."""
+    out = sh(["git", "-C", repo, "show", "--name-only", "--format=", sha])
+    return [p for p in (l.strip() for l in out.splitlines()) if p and not SKIP_PATH.search(p)]
+
+
+def can_hold(repo, ref, paths, is_ref=True):
+    """Could this target hold this commit at all -- does ANY file it touched even exist there?
+
+    *** A TARGET THAT DOES NOT HAVE THE FILE WAS BEING SCORED, AND SCORED WRONG IN THE DANGEROUS
+    DIRECTION. *** Measured 2026-09-29 auditing twelve commits: d81fbc5f touches exactly one file,
+    esp32-c3/main/local_hw.cpp. Two of the three target branches have no esp32-c3/ directory at all --
+    that target is not built on those lines. The tool reported `present` on both, because the tokens it
+    picked exist elsewhere in those trees for unrelated reasons. This file's own docstring calls a
+    false `present` the one that hides a real gap, and here it was inventing a port into a target that
+    cannot receive one.
+
+    The rule is deliberately conservative: only ANY-none, never some-missing. A commit touching a
+    shared file and a target-only file is still scored, because the shared half can genuinely land.
+    And it is EXISTENCE, not equivalence -- a file renamed on the target reads as absent, so `n/a`
+    means "look at whether this target has this code at all", not "this cannot possibly apply"."""
+    if not paths:
+        return True
+    for p in paths:
+        if is_ref:
+            if subprocess.call(["git", "-C", repo, "cat-file", "-e", "%s:%s" % (ref, p)],
+                               stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT) == 0:
+                return True
+        elif os.path.exists(os.path.join(ref, p)):
+            return True
+    return False
+
+
 def _looks_like_rev(repo, value):
     """Does this string resolve as a git revision? Used to catch it being passed to --since."""
     try:
@@ -647,10 +680,16 @@ def main():
         old, old_exts, old_by_path = old_lines_for(a.repo, sha, skip, a.min_line, tip=a.rev or sha)
         # Extracted lazily: only a cell that came back absent/no-tokens asks for it.
         prose = None
+        touched = paths_touched(a.repo, sha)
         res = {}
         for name, kind, where in targets:
             if kind == "ref" and in_history(a.repo, sha, where):
                 res[name] = ("in-history", 0, 0, 0, 0)
+                continue
+            # Asked BEFORE any token work: a target that cannot hold the commit must not be scored,
+            # and skipping it is also the cheapest cell in the table. See can_hold().
+            if not can_hold(a.repo, where, touched, is_ref=(kind == "ref")):
+                res[name] = ("n/a", 0, 0, 0, 0)
                 continue
             if kind == "ref":
                 hits = len(tokens_found_in_ref(a.repo, where, toks, exts))
@@ -701,6 +740,8 @@ def main():
     print("  TRIAGE ONLY. 'partial' is the interesting column and always needs reading by hand.")
     print("  'no-tokens' means nothing testable (version bump, translations) - not evidence either way.")
     print("  '+OLD' = the target still carries a line this commit ELIMINATED from its tree -- read it first.")
+    print("  'n/a' = not one file this commit touches exists on that branch -- it cannot hold it,")
+    print("          so it is not scored. Usually a target that line does not build.")
     print("  '+PROSE' = the code was not found but this commit's own COMMENT text is on that branch:")
     print("            the normal shape of a port that was ADAPTED and renamed. Never trust 'absent' with it.")
 

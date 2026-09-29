@@ -8,6 +8,16 @@ getting; the commit messages carry the reasoning and the measurements behind the
 ## 2026-09-29
 
 ### Changed
+* **`verify_port.py` no longer scores a branch that does not have the file.** A commit touching only
+  one path was reported `present` on two branches that do not contain that path at all -- the target
+  is not built on those lines -- because the tokens it picked exist elsewhere in those trees for
+  unrelated reasons. The docstring calls a false `present` the one that hides a real gap, and this was
+  inventing a port into a target that cannot receive one. Such a cell now reads `n/a` and is not
+  scored, which is also the cheapest cell in the table. Conservative by design: `n/a` only when NOT
+  ONE touched file exists there, so a commit spanning a shared file and a target-only file is still
+  scored on the half that can land. It is existence, not equivalence -- a file renamed on the target
+  reads as absent, so `n/a` means "check whether this line has this code at all".
+
 * **`verify_port.py` is fast enough to run on a real audit.** It used one `git grep` per token per
   branch, plus one per token against the parent -- about forty subprocesses per commit. Auditing
   twelve commits across three branches of a large repository blew a ten-minute timeout and had to be

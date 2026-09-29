@@ -2227,6 +2227,19 @@ def main():
     _vp = _ilu.module_from_spec(_vp_spec)
     _vp_spec.loader.exec_module(_vp)
 
+    # can_hold(): a target that does not have the file must not be scored at all. The rule is
+    # ANY-none, never some-missing -- measured case: a commit touching only esp32-c3/main/local_hw.cpp
+    # was reported `present` on two branches that have no esp32-c3/ directory, because its tokens
+    # existed elsewhere in those trees. A false `present` hides a real gap.
+    with tempfile.TemporaryDirectory() as _td:
+        (Path(_td) / "shared.c").write_text("x\n")
+        check("a commit touching nothing is not declared n/a",
+              _vp.can_hold(_td, _td, [], is_ref=False) is True)
+        check("a target missing every touched file cannot hold the commit",
+              _vp.can_hold(_td, _td, ["gone.c", "also-gone.c"], is_ref=False) is False)
+        check("one surviving path is enough to score -- any-none, not some-missing",
+              _vp.can_hold(_td, _td, ["gone.c", "shared.c"], is_ref=False) is True)
+
     _got = _vp.phrases_from_comments(
         ["*** AND DROP ANY QUEUED POWER-OFF, BECAUSE WE JUST COMMANDED THIS PIN EXPLICITLY. ***"])
     check("a shouted phrase is extracted even though it contains three-letter words",
