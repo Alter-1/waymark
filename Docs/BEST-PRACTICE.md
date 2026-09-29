@@ -212,6 +212,30 @@ a branch, a build or a binary still contains something, look at the line -- or s
 the comments stripped. What is inside a comment is not in the program.
 
 
+**The flip side, and it is not a contradiction: the comment is bad evidence about BEHAVIOUR and good
+evidence about PROVENANCE.** Everything above is about "does this code do X", where prose cannot be
+trusted. "Did this change reach that branch" is a different question, and there the prose is the more
+faithful witness — because a port is *adapted* and prose is *copied*. Measured on a four-branch tree:
+a fix present on three branches was reported absent on all three, because the branch with a different
+internal model had renamed the very function the fix turns on. The distinctive capitalised phrase from
+its comment was on all four; one phrase was on the three PORTS and not on the original, because
+whoever adapted it explained it in place.
+
+So when a content check says a fix is missing, search the target for the commit's own wording before
+believing it. Two rules the same measurement settled, both of which the obvious implementation gets
+wrong:
+
+* **Phrases, never single words.** One word from that commit matched thirty-plus times on every
+  branch. A word is a coincidence; four in a row are a quotation.
+* **Take the SHOUTED phrase first.** A window of long words picked wording the ports had rewritten,
+  while the phrase that had crossed verbatim could not even be extracted, because two of its words
+  are three letters long. A capitalised phrase is the part of a comment people move without
+  rewriting — it is the point being made, not the explanation around it.
+
+And keep the two searches separately labelled. A hit in prose is never evidence that the code is
+there; it is evidence that somebody *considered* it there, which is a reason to go and read the file,
+not a verdict.
+
 ## 4. Silent success is the worst failure mode
 
 The failures that cost the most are the ones that look like answers.
