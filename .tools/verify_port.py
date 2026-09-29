@@ -156,6 +156,130 @@ def _in_parent(repo, sha, token):
         return False
 
 
+# Words too common to anchor a phrase on. A phrase is only distinctive if its WORDS are.
+PROSE_STOP = set("""the and that this with from have been were will would could should than then
+into over under about after before while which when where what does done just only also even
+such same both each other another more most less least very much many some none than
+port ports code line lines file files case cases value values return returns
+""".split())
+
+
+def phrases_from_comments(lines):
+    """The phrase-picking rule, with no git in it so the tests can hold it still."""
+    # *** SHOUTED PHRASES FIRST, AND THAT ORDER IS THE MEASUREMENT, NOT A STYLE PREFERENCE. ***
+    # 2026-09-29: the first version of this took 4-word windows of words >= 4 chars. On the commit it
+    # was built for it chose "request ripened almost immediately" -- and the three PORTS had reworded
+    # that to "ripens about a second later", so every phrase missed and the signal read as absent.
+    # What HAD crossed verbatim to all four branches was "DROP ANY QUEUED POWER-OFF", which that rule
+    # could not even extract: ANY and OFF are three letters, so no window could form across them.
+    # A CAPITALISED PHRASE IS THE ONE PART OF A COMMENT PEOPLE MOVE WITHOUT REWRITING -- it is the
+    # point being made, not the explanation around it. Take those first; the prose window is a
+    # fallback, and it is the weaker signal.
+    caps, cand = [], []
+    for body in lines:
+        for run in re.findall(r"\b[A-Z][A-Z0-9'-]*(?:[ -][A-Z][A-Z0-9'-]*){2,}\b", body):
+            run = run.strip(" -")
+            words = run.split()
+            if len(run) >= 15 and sum(1 for w in words if len(w) >= 4) >= 2:
+                caps.append(run)
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_'-]*", body)
+        for i in range(len(words) - 3):
+            win = words[i:i + 4]
+            # Relaxed from "every word >= 4" to "at least two ANCHOR words": a short word inside a
+            # phrase does not make it common, and demanding four long ones threw away the good ones.
+            anchors = [w for w in win if len(w) >= 5 and w.lower() not in PROSE_STOP]
+            if len(anchors) < 2 or all(w.lower() in PROSE_STOP for w in win):
+                continue
+            # Rebuild from the ORIGINAL line so punctuation inside the window survives a -F grep.
+            phrase = " ".join(win)
+            if len(phrase) >= 20 and phrase in body:
+                cand.append(phrase)
+    return caps + cand
+
+
+def prose_for(repo, sha, max_phrases=4):
+    """Distinctive PHRASES from the comment lines this commit added.
+
+    *** PROSE PORTS WHERE IDENTIFIERS DO NOT. *** tokens_for() deliberately skips comments, and
+    _grep_found() deliberately ignores matches inside them -- both correct, because a comment
+    mentioning a symbol is not an implementation of it. But that leaves this tool blind to the port
+    that was ADAPTED rather than copied, which is the normal kind here.
+
+    MEASURED 2026-09-29 on a real four-branch tree. Commit 7b81bf05 ("an explicit On/Off cancels a
+    queued power-off") scored `absent` on ALL THREE target branches. It is PRESENT on all three: two
+    of them call ClearQueuePowerOff(), and the third -- a line with a different port model -- does the
+    same job as `nQueuedTransiverPowerOff[n] = 0`. The adaptation renamed the very thing the fix turns
+    on, which is exactly what this tool's docstring assumes does not happen. Three false ABSENTs, the
+    direction that costs a day, in the one commit it was pointed at.
+
+    What DID cross unchanged was the reasoning: the phrase "DROP ANY QUEUED POWER-OFF" is on all four
+    branches, and "ripens" is on the three PORTS and not on the original -- whoever adapted it
+    explained it in place. So the comment is the more faithful witness, and one git grep finds it.
+
+    WHY PHRASES AND NOT WORDS: on the same measurement the single word "commanded" matched 30+ times
+    on every branch. Only multi-word windows discriminate, and only words long enough to carry
+    meaning anchor them -- hence PROSE_STOP and the length floor.
+    """
+    diff = sh(["git", "-C", repo, "show", sha, "--format=", "--unified=0"])
+    keep_file = True
+    lines, exts = [], set()
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            path = line[6:]
+            keep_file = not SKIP_PATH.search(path)
+            if keep_file:
+                exts.add(os.path.splitext(path)[1])
+            continue
+        if line.startswith("diff ") or line.startswith("--- ") or not line.startswith("+"):
+            continue
+        if not keep_file or line.startswith("+++"):
+            continue
+        body = line[1:].strip()
+        # ONLY comments here -- the mirror image of tokens_for(), which takes only code.
+        if not re.match(r"(//|/\*|\*|#|<!--|;;)", body):
+            continue
+        body = re.sub(r"^(//+|/\*+|\*+|#+|<!--|;;)\s*", "", body)
+        body = re.sub(r"(\*/|-->)\s*$", "", body)
+        body = re.sub(r"\s+", " ", body).strip(" *")
+        if len(body) >= 30:
+            lines.append(body)
+
+    cand = phrases_from_comments(lines)
+    # Keep the caps-first ORDER; only de-duplicate. sorted(set(...)) would have discarded it.
+    seen, ordered = set(), []
+    for p in cand:
+        if p not in seen:
+            seen.add(p); ordered.append(p)
+    uniq = []
+    for p in ordered:
+        if not any(p in u or u in p for u in uniq):
+            uniq.append(p)
+        if len(uniq) >= max_phrases * 3:
+            break
+    # A phrase already in the parent tree says nothing -- same rule as the code tokens.
+    out = [p for p in uniq if not _in_parent(repo, sha, p)]
+    return out[:max_phrases], exts
+
+
+def prose_in_ref(repo, ref, phrases, exts, skip):
+    """How many of these phrases appear in `ref` -- COMMENTS INCLUDED, which is the whole point.
+
+    _grep_found() strips comments before matching; this must not, so it greps directly. A hit means
+    the commit's own reasoning is on that branch, which is evidence the port was CONSIDERED there --
+    never evidence the code is present. The cell says `+PROSE`, and a human reads it."""
+    if not phrases:
+        return 0
+    hits = 0
+    for p in phrases:
+        cmd = ["git", "-C", repo, "grep", "-qF", "--", p, ref]
+        try:
+            if subprocess.call(cmd, stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT) == 0:
+                hits += 1
+        except Exception:
+            pass
+    return hits
+
+
 def present_in(tree, token, exts=None):
     """grep -rqF across the tree, restricted to the file types the COMMIT touched.
 
@@ -408,6 +532,8 @@ def main():
                    help="regex of paths to ignore (generated files), repeatable")
     p.add_argument("--min-line", type=int, default=20, help="shortest removed line tested for +OLD")
     p.add_argument("--only-old", action="store_true", help="print only commits with a +OLD cell")
+    p.add_argument("--no-prose", action="store_true",
+                   help="skip the +PROSE adapted-port signal (one extra git grep per absent cell)")
     p.add_argument("--no-tokens", action="store_true",
                    help="skip the token score, test +OLD only -- one git grep per commit and target "
                         "instead of ~40; the score shows as 'skipped'")
@@ -446,10 +572,12 @@ def main():
         sha, date, subj = parts
         toks, exts = ([], set()) if a.no_tokens else tokens_for(a.repo, sha)
         old, old_exts, old_by_path = old_lines_for(a.repo, sha, skip, a.min_line, tip=a.rev)
+        # Extracted lazily: only a cell that came back absent/no-tokens asks for it.
+        prose = None
         res = {}
         for name, kind, where in targets:
             if kind == "ref" and in_history(a.repo, sha, where):
-                res[name] = ("in-history", 0, 0, 0)
+                res[name] = ("in-history", 0, 0, 0, 0)
                 continue
             if kind == "ref":
                 hits = sum(1 for t in toks if present_in_ref(a.repo, where, t, exts))
@@ -457,16 +585,26 @@ def main():
             else:
                 hits = sum(1 for t in toks if present_in(where, t, exts))
                 old_hits = sum(1 for o in old if present_in(where, o, old_exts))
-            res[name] = ("skipped" if a.no_tokens else classify(hits, len(toks)), hits, len(toks), old_hits)
+            score = "skipped" if a.no_tokens else classify(hits, len(toks))
+            # *** THE ADAPTED-PORT SIGNAL. *** Only asked when the code pass found nothing, so the
+            # common case pays no extra greps. See prose_for() for the measurement behind it.
+            prose_hits = 0
+            if score in ("absent", "no-tokens") and kind == "ref" and not a.no_prose:
+                if prose is None:
+                    prose = prose_for(a.repo, sha)[0]
+                prose_hits = prose_in_ref(a.repo, where, prose, exts, skip)
+            res[name] = (score, hits, len(toks), old_hits, prose_hits)
         if a.hide_shared and all(r[0] == "in-history" for r in res.values()):
             continue
         rows.append((sha[:8], date, subj, toks, res, old))
 
     def cell(r):
-        return r[0] + ("+OLD" if r[3] else "")
+        # +PROSE is NOT a weaker +OLD: it says the code was not found but the commit's own reasoning
+        # IS on that branch, which is how an adapted port looks. Read it before believing 'absent'.
+        return r[0] + ("+OLD" if r[3] else "") + ("+PROSE" if len(r) > 4 and r[4] else "")
 
     names = [n for n, _, _ in targets]
-    w = max(len(s) for s in names + ["no-tokens+OLD"])
+    w = max(len(s) for s in names + ["no-tokens+OLD+PROSE"])
     print("")
     print("  %-8s %-10s %-58s %s" % ("commit", "date", "subject", "  ".join("%-*s" % (w, n) for n in names)))
     print("  " + "-" * (80 + (w + 2) * len(names)))
@@ -490,6 +628,8 @@ def main():
     print("  TRIAGE ONLY. 'partial' is the interesting column and always needs reading by hand.")
     print("  'no-tokens' means nothing testable (version bump, translations) - not evidence either way.")
     print("  '+OLD' = the target still carries a line this commit ELIMINATED from its tree -- read it first.")
+    print("  '+PROSE' = the code was not found but this commit's own COMMENT text is on that branch:")
+    print("            the normal shape of a port that was ADAPTED and renamed. Never trust 'absent' with it.")
 
     if a.csv:
         f = open(a.csv, "w")

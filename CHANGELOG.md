@@ -5,6 +5,33 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-29
+
+### Added
+* **`verify_port.py` -- a `+PROSE` cell, for the port that was ADAPTED and renamed.** The tool picks
+  distinctive identifiers out of a commit and greps the target branches for them, on the stated
+  assumption that adaptation "does not usually rename the identifier the fix turns on". Measured on a
+  four-branch firmware tree the day this was written: it called one commit `absent` on all three
+  targets, and the fix is PRESENT on all three -- two of them call the new function, and the third,
+  which has a different port model, does the same job through an array index. Three false ABSENTs,
+  the direction that costs a day, in the one commit it was pointed at.
+
+  What crossed unchanged was the REASONING. A capitalised phrase from the commit's own comment was on
+  all four branches, and one phrase was on the three PORTS and not on the original -- whoever adapted
+  it explained it in place. So a cell that finds no code but finds the commit's own prose now reads
+  `absent+PROSE`, which says: the port probably landed under another name, go and read it. It is
+  never evidence the code is there, and the legend says so.
+
+  Two things the measurement settled, both of which the obvious implementation gets wrong. Single
+  words are useless -- one word from that commit matched thirty-plus times on every branch -- so only
+  multi-word phrases count. And the rule must take SHOUTED phrases first: a 4-word window of long
+  words picked wording that the ports had rewritten, while the phrase that had crossed verbatim was
+  unextractable because two of its words are three letters long. A capitalised phrase is the part of
+  a comment people move without rewriting.
+
+  Costs nothing on a healthy run: the extra grep is asked only for a cell that already came back
+  `absent` or `no-tokens`. `--no-prose` turns it off.
+
 ## 2026-09-20
 
 ### Added

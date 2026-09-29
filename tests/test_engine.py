@@ -2216,6 +2216,28 @@ def main():
             default_index_path=lambda ext: Path(td) / "nothing-here.sqlite")
         check("a missing index degrades to the fallback instead of raising",
               _an._guess_file_from_index("CFoo::Teardown") == "")
+    # ---- verify_port's prose signal: the phrase-picking rule, held still without git.
+    # THE BUG THESE GUARD, measured 2026-09-29: the first rule took 4-word windows of words >= 4
+    # characters. The phrase that had actually crossed to all four branches verbatim was
+    # "DROP ANY QUEUED POWER-OFF" -- and ANY and OFF are three letters, so no window could form
+    # across it. The rule could not extract the one piece of evidence it existed to find, and the
+    # port read as absent on three branches where it was present.
+    import importlib.util as _ilu
+    _vp_spec = _ilu.spec_from_file_location("_vp", ROOT / ".tools" / "verify_port.py")
+    _vp = _ilu.module_from_spec(_vp_spec)
+    _vp_spec.loader.exec_module(_vp)
+
+    _got = _vp.phrases_from_comments(
+        ["*** AND DROP ANY QUEUED POWER-OFF, BECAUSE WE JUST COMMANDED THIS PIN EXPLICITLY. ***"])
+    check("a shouted phrase is extracted even though it contains three-letter words",
+          any("DROP ANY QUEUED POWER-OFF" in p for p in _got))
+    check("the shouted phrase is offered before the prose windows",
+          bool(_got) and _got[0].isupper())
+    check("a line of nothing but stopwords yields no phrase",
+          _vp.phrases_from_comments(["that the and this with from have been were will would"]) == [])
+    check("a short comment line is not a phrase source",
+          _vp.phrases_from_comments(["// too short to mean much"]) == [])
+
     # THE EXIT CODE MUST SEE EVERY CHECK. There is an `if FAILED: return 1` partway up this
     # function, and roughly 350 lines of tests run AFTER it - the html lexer, the js vars,
     # dangling-refs, and everything above. A failure in any of those printed FAIL and then fell
