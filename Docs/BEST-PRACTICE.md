@@ -396,6 +396,65 @@ because those are the answers you stop reading at.
 
 ---
 
+### Three questions to ask a result — because you cannot enforce a question asked *before*
+
+The list above is what to ask an instrument. This is about *when*, and it exists because the obvious
+answer does not work.
+
+The natural rule is a pre-condition: **"consult what is already known before you start
+investigating."** It is correct, it is cheap, and it fails — reliably. It gates on an *activity
+boundary*, and that boundary is self-declared. Someone mid-task does not experience "run the test I
+already wrote" as *starting* an investigation; the subject feels already open. No wording fixes this,
+because every wording still requires you to notice you have crossed a line you drew yourself, at the
+moment you are least able to. Measured honestly: the rule was written down, had been read that day,
+and did not fire.
+
+**A result, by contrast, is an artefact.** A number exists. A verdict, a diff, an error message exist.
+You can gate on a thing. So put the gate after:
+
+1. **Explain this exact value.** Not the phenomenon — *this* number. Why 50 and not 47? Name a
+   mechanism, with a file and line or a recorded fact behind it. "Such-and-such happens here" is not
+   an explanation of a magnitude.
+2. **What did you expect before you looked?** If there was no prediction, there can be no surprise,
+   and the measurement has confirmed nothing. This is the question that catches the *reassuring*
+   readings, which is where the expensive errors live.
+3. **What would make this false?** Name the control you would run, or label the claim UNEXPLAINED and
+   leave it labelled.
+
+The reason these work where the pre-condition does not is a side-effect, not obedience: **you cannot
+answer 1 or 3 without domain facts.** The cheapest source of domain facts is the recorded knowledge
+you were supposed to consult, so consulting it stops being a ritual to remember and becomes the only
+route to a mandatory answer. And unlike "did you check?", the answers are *content* — they can be
+read, and they can be wrong in public.
+
+A worked case, minutes old at the time of writing. A port showed a flat plateau of dropped frames,
+50/s in most trials and 100/s in two. Reporting that is easy and useless. Asking *why exactly 50*
+found a deliberate rate limiter, and then — because question 3 demanded a control — found that the
+limit in the stored configuration (150) **was not the limit in force** (200, which the device reports
+itself, having re-derived it from measured traffic). The configured number produced a beautiful
+arithmetic story, 200 offered minus 150 allowed equals the 50 observed, that was about a value the
+firmware does not use. Question 1 found the mechanism; question 3 stopped it being recorded wrong.
+
+**Stronger than any question: make the instrument carry its own caveats.** A measurement script that
+prints, before its first number, the recorded facts that bound how those numbers may be read cannot be
+skipped, does not depend on anyone remembering, survives the author forgetting the context, and works
+for a reader who has no access to the knowledge base at all. It is the only form of this discipline
+that travels with the artefact. Where a number is emitted, the constraints on reading it belong in the
+same output.
+
+So, in order of how much they can be relied on:
+
+| | form | requires |
+|---|---|---|
+| strongest | the instrument prints the facts that bound its own output | one list, written once |
+| workable | the three questions, applied to every result before it is reported | a habit with a visible trigger |
+| weakest | consult knowledge before starting | noticing a boundary you drew yourself |
+
+Keep the weakest one — it is free and it sometimes fires, particularly on a genuinely new subject. Do
+not build on it.
+
+---
+
 ### A refusal that leaves the refused value in force is not a refusal
 
 Validation that rejects an input must also undo it. It is easy to write the check at the point where
