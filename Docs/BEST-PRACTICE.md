@@ -396,6 +396,33 @@ because those are the answers you stop reading at.
 
 ---
 
+### An instrument that fires on every run cannot be read — separate the quantity from the verdict
+
+A checker reported names that hold one concept in two different units. Four did, and all four were
+correct: one real offender, one honest false positive, two halves of a legitimate local conversion. It
+exited non-zero on all of them, so **every run failed**, which is not a gate — it is noise carrying a
+number. Its sibling, a terminology checker, had already made and reverted the same mistake: a rule about
+quotation marks produced 409 hits containing essentially no errors, and the rule was deleted rather than
+tuned.
+
+The two outputs are different things and must not share a channel:
+
+  * a **quantity** is something to read — a list, a count, a ranking. It informs a human and must *not*
+    touch the exit code, however alarming it looks.
+  * a **verdict** is a claim that something is wrong, which a human must act on. Only this sets the
+    status.
+  * and keep a **third code for "I could not check"** — a failed self-test, a missing input, an
+    inapplicable question. Without it, a broken instrument's silence is indistinguishable from a clean
+    run, which is the worst outcome available (see *Silent success*, above).
+
+The symptom to watch for in your own tooling: *the exit code never changes.* A gate that has been red
+since the day it was written has been green all along, because nobody reads it. The fix is not a
+threshold — a threshold invented to quiet the noise usually removes the very case the tool exists to
+find, which is measurable: here, the noisiest name had four conversion sites and the one that mattered
+had two, so **every cutoff that silenced the noise also silenced the finding.**
+
+---
+
 ### Three questions to ask a result — because you cannot enforce a question asked *before*
 
 The list above is what to ask an instrument. This is about *when*, and it exists because the obvious
