@@ -1,3 +1,7 @@
+# WINDOWS-ONLY DIAGNOSTIC COLLECTOR; NOT EXECUTED BY THE CROSS-PLATFORM CI SUITE.
+# PRIVACY: -IncludeUiText records the Name of every UI Automation descendant owned by the selected
+# processes. Those names commonly contain the text displayed on screen and may therefore include
+# private user or customer data. Use the switch only deliberately and protect the output accordingly.
 param(
     [Parameter(Mandatory=$true)][int[]]$ProcessIds,
     [Parameter(Mandatory=$true)][string]$OutputFile,
