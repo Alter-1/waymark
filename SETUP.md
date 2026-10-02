@@ -10,8 +10,24 @@ Every caution in it is something that actually happened, not a hypothetical.
 
 ```bash
 cp -r .tools/ /path/to/your/project/.tools/
+rm -f /path/to/your/project/.tools/code_index.*     # <- DO NOT SKIP THIS
 cd /path/to/your/project
 ```
+
+**`cp -r` brings this repository's own generated indexes with the engine, and they are poison in a
+new project.** waymark's `.tools/` holds one `code_index.<branch>.sqlite` per branch anyone has
+indexed here -- a dozen of them, the largest a couple of megabytes -- and they are *waymark's*
+index, of waymark's `sample/` tree. In the new project they cause three separate wrong answers:
+
+* if the new project's branch has the SAME NAME as one of them (`main` and `master` are both in
+  there), the first query answers from waymark's sample code until something rebuilds it;
+* `--branches all` lists branches that do not exist in the new repository;
+* anything reading the directory directly -- including a person -- picks a file at random.
+
+Measured 2026-10-02 initialising a real project: the copied index returned `KV+` API markers from
+`sample/cli/kvctl.py` for a tree that has no such file, while the freshly built index of the same
+tree was correct. The generated files are disposable by design, so deleting them loses nothing;
+`index_code.py` writes the one that belongs to the new project on its first run.
 
 Create `kb.config.json` at the repository root — this is the only file that knows anything about
 your project:
