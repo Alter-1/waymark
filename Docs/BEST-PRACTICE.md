@@ -212,6 +212,30 @@ a branch, a build or a binary still contains something, look at the line -- or s
 the comments stripped. What is inside a comment is not in the program.
 
 
+**The flip side, and it is not a contradiction: the comment is bad evidence about BEHAVIOUR and good
+evidence about PROVENANCE.** Everything above is about "does this code do X", where prose cannot be
+trusted. "Did this change reach that branch" is a different question, and there the prose is the more
+faithful witness — because a port is *adapted* and prose is *copied*. Measured on a four-branch tree:
+a fix present on three branches was reported absent on all three, because the branch with a different
+internal model had renamed the very function the fix turns on. The distinctive capitalised phrase from
+its comment was on all four; one phrase was on the three PORTS and not on the original, because
+whoever adapted it explained it in place.
+
+So when a content check says a fix is missing, search the target for the commit's own wording before
+believing it. Two rules the same measurement settled, both of which the obvious implementation gets
+wrong:
+
+* **Phrases, never single words.** One word from that commit matched thirty-plus times on every
+  branch. A word is a coincidence; four in a row are a quotation.
+* **Take the SHOUTED phrase first.** A window of long words picked wording the ports had rewritten,
+  while the phrase that had crossed verbatim could not even be extracted, because two of its words
+  are three letters long. A capitalised phrase is the part of a comment people move without
+  rewriting — it is the point being made, not the explanation around it.
+
+And keep the two searches separately labelled. A hit in prose is never evidence that the code is
+there; it is evidence that somebody *considered* it there, which is a reason to go and read the file,
+not a verdict.
+
 ## 4. Silent success is the worst failure mode
 
 The failures that cost the most are the ones that look like answers.
@@ -323,6 +347,138 @@ where the defect tends to live.
 None of this closes the gap. You cannot validate a definition you have not finished forming; you can
 only keep its edges visible and keep a second source in play. A procedure that promised completeness
 here would be the same overconfidence wearing a new costume.
+
+
+### Six questions to ask an instrument before believing it
+
+The section above is the deepest case. This is the practical one, and it comes from counting: in one
+day's work on a four-branch firmware tree, **eleven conclusions were wrong because an instrument
+lied, and almost nothing was wrong with the firmware.** The system under test was healthier than the
+tools watching it. That ratio is the reason this section exists — debugging effort goes to the
+instruments, and it is rarely budgeted there.
+
+Ask these before trusting a reading. Each one is a real failure, not a hypothetical:
+
+1. **Is it measuring the quantity I asked about?** `git merge-base --is-ancestor` reported a fix "not
+   ported" to three branches that had it — it measures shared *history*, and the question was
+   *content*. A grep for the function name said the same, because the port was adapted and renamed:
+   a symbol is not a behaviour. And `ssh -T host` answered *Welcome* while the operation that
+   followed could not connect at all, because it opened a different connection than the one tested.
+2. **Could a zero mean "cannot see" rather than "not there"?** A metric that needs incoming traffic
+   cannot prove a fault that *stops* the traffic — it reads 0 on the broken build and the fixed one
+   alike. Before believing a zero, check the instrument's input existed in the state under test.
+3. **Am I judging it against the right baseline?** A port dropped packets in 62 of 91 seconds and the
+   check called every one a fault. The drops were *designed* — that port drops while it waits for a
+   shared line. The measurement was correct and the threshold was fiction.
+4. **Did a constraint I imposed silently not apply — or silently become the answer?** `--since=<a
+   revision>` was accepted by an approxidate parser as *no bound at all*, so a one-commit query
+   enumerated five thousand. And `head -5` on a range answers the question "what are the first five",
+   which is never the question. A cap read as data measures the cap.
+5. **Does this output look the same in two different worlds?** A dry-run push prints byte-identical
+   lines to a real one. If the same text can mean "published" and "did not publish", the text is not
+   evidence — go and look at the far end.
+6. **Does it have standing to answer at all?** A port-verification tool scored branches that do not
+   contain the file in question, and the tokens matched elsewhere, so it invented a port into a target
+   that could not receive one. An instrument asked an inapplicable question should say *not
+   applicable*, never a score.
+
+And a seventh that no question catches: **a plain bug whose output is in range.** A record counter
+reported about one per second against a real two hundred, because the pattern was line-anchored and
+the records arrive concatenated. Nothing looked wrong — 1 is a number. The only defence is an
+order-of-magnitude expectation derived from the domain before reading the result.
+
+**On the honesty of this list:** three of those shapes are attested by more than one case and four by
+exactly one, so the taxonomy is close to over-fitted and some of them will collapse into each other
+with more evidence. Treat the *questions* as the durable part and the categories as scaffolding. The
+one generalisation worth keeping is the direction of the danger: of the eleven, the two most expensive
+were both *confident and wrong in the reassuring direction* — a false "present" and a false "absent" —
+because those are the answers you stop reading at.
+
+---
+
+### An instrument that fires on every run cannot be read — separate the quantity from the verdict
+
+A checker reported names that hold one concept in two different units. Four did, and all four were
+correct: one real offender, one honest false positive, two halves of a legitimate local conversion. It
+exited non-zero on all of them, so **every run failed**, which is not a gate — it is noise carrying a
+number. Its sibling, a terminology checker, had already made and reverted the same mistake: a rule about
+quotation marks produced 409 hits containing essentially no errors, and the rule was deleted rather than
+tuned.
+
+The two outputs are different things and must not share a channel:
+
+  * a **quantity** is something to read — a list, a count, a ranking. It informs a human and must *not*
+    touch the exit code, however alarming it looks.
+  * a **verdict** is a claim that something is wrong, which a human must act on. Only this sets the
+    status.
+  * and keep a **third code for "I could not check"** — a failed self-test, a missing input, an
+    inapplicable question. Without it, a broken instrument's silence is indistinguishable from a clean
+    run, which is the worst outcome available (see *Silent success*, above).
+
+The symptom to watch for in your own tooling: *the exit code never changes.* A gate that has been red
+since the day it was written has been green all along, because nobody reads it. The fix is not a
+threshold — a threshold invented to quiet the noise usually removes the very case the tool exists to
+find, which is measurable: here, the noisiest name had four conversion sites and the one that mattered
+had two, so **every cutoff that silenced the noise also silenced the finding.**
+
+---
+
+### Three questions to ask a result — because you cannot enforce a question asked *before*
+
+The list above is what to ask an instrument. This is about *when*, and it exists because the obvious
+answer does not work.
+
+The natural rule is a pre-condition: **"consult what is already known before you start
+investigating."** It is correct, it is cheap, and it fails — reliably. It gates on an *activity
+boundary*, and that boundary is self-declared. Someone mid-task does not experience "run the test I
+already wrote" as *starting* an investigation; the subject feels already open. No wording fixes this,
+because every wording still requires you to notice you have crossed a line you drew yourself, at the
+moment you are least able to. Measured honestly: the rule was written down, had been read that day,
+and did not fire.
+
+**A result, by contrast, is an artefact.** A number exists. A verdict, a diff, an error message exist.
+You can gate on a thing. So put the gate after:
+
+1. **Explain this exact value.** Not the phenomenon — *this* number. Why 50 and not 47? Name a
+   mechanism, with a file and line or a recorded fact behind it. "Such-and-such happens here" is not
+   an explanation of a magnitude.
+2. **What did you expect before you looked?** If there was no prediction, there can be no surprise,
+   and the measurement has confirmed nothing. This is the question that catches the *reassuring*
+   readings, which is where the expensive errors live.
+3. **What would make this false?** Name the control you would run, or label the claim UNEXPLAINED and
+   leave it labelled.
+
+The reason these work where the pre-condition does not is a side-effect, not obedience: **you cannot
+answer 1 or 3 without domain facts.** The cheapest source of domain facts is the recorded knowledge
+you were supposed to consult, so consulting it stops being a ritual to remember and becomes the only
+route to a mandatory answer. And unlike "did you check?", the answers are *content* — they can be
+read, and they can be wrong in public.
+
+A worked case, minutes old at the time of writing. A port showed a flat plateau of dropped frames,
+50/s in most trials and 100/s in two. Reporting that is easy and useless. Asking *why exactly 50*
+found a deliberate rate limiter, and then — because question 3 demanded a control — found that the
+limit in the stored configuration (150) **was not the limit in force** (200, which the device reports
+itself, having re-derived it from measured traffic). The configured number produced a beautiful
+arithmetic story, 200 offered minus 150 allowed equals the 50 observed, that was about a value the
+firmware does not use. Question 1 found the mechanism; question 3 stopped it being recorded wrong.
+
+**Stronger than any question: make the instrument carry its own caveats.** A measurement script that
+prints, before its first number, the recorded facts that bound how those numbers may be read cannot be
+skipped, does not depend on anyone remembering, survives the author forgetting the context, and works
+for a reader who has no access to the knowledge base at all. It is the only form of this discipline
+that travels with the artefact. Where a number is emitted, the constraints on reading it belong in the
+same output.
+
+So, in order of how much they can be relied on:
+
+| | form | requires |
+|---|---|---|
+| strongest | the instrument prints the facts that bound its own output | one list, written once |
+| workable | the three questions, applied to every result before it is reported | a habit with a visible trigger |
+| weakest | consult knowledge before starting | noticing a boundary you drew yourself |
+
+Keep the weakest one — it is free and it sometimes fires, particularly on a genuinely new subject. Do
+not build on it.
 
 ---
 

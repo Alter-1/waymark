@@ -5,6 +5,63 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## 2026-09-29
+
+### Changed
+* **`verify_port.py` no longer scores a branch that does not have the file.** A commit touching only
+  one path was reported `present` on two branches that do not contain that path at all -- the target
+  is not built on those lines -- because the tokens it picked exist elsewhere in those trees for
+  unrelated reasons. The docstring calls a false `present` the one that hides a real gap, and this was
+  inventing a port into a target that cannot receive one. Such a cell now reads `n/a` and is not
+  scored, which is also the cheapest cell in the table. Conservative by design: `n/a` only when NOT
+  ONE touched file exists there, so a commit spanning a shared file and a target-only file is still
+  scored on the half that can land. It is existence, not equivalence -- a file renamed on the target
+  reads as absent, so `n/a` means "check whether this line has this code at all".
+
+* **`verify_port.py` is fast enough to run on a real audit.** It used one `git grep` per token per
+  branch, plus one per token against the parent -- about forty subprocesses per commit. Auditing
+  twelve commits across three branches of a large repository blew a ten-minute timeout and had to be
+  split into four parallel batches to finish at all, and *a tool nobody can afford to run does not
+  get run* -- the question then gets answered by hand, which is the failure this file exists to
+  prevent. The token pass and the parent filter are now one batched `git grep -f` each. Same
+  semantics deliberately: the token pass still counts a token wherever it appears, comments included,
+  and the parent filter still searches the whole parent tree with no extension restriction. Verified
+  by scoring the same commits before and after and getting identical cells.
+
+### Added
+* **`verify_port.py --commit SHA` -- verify named commits, with no date arithmetic.** Chasing one
+  fix meant inventing a date range around it, and the two ways that goes wrong were both hit within
+  an hour. `--since` is a git *approxidate*, and approxidate never fails: given a revision it means
+  "no bound at all", so `--since=<sha>^` asked for 5218 commits instead of one and the run had to be
+  killed, with nothing in git's output saying the bound was ignored. That is now refused, by name,
+  pointing at `--commit`. And a date bound is read in LOCAL time, so `--since=<the day a commit is
+  dated>` can exclude that very commit when its own timezone puts it before local midnight -- which
+  it did, silently returning an empty table. Both are documented in `--help` where they bite.
+
+* **`verify_port.py` -- a `+PROSE` cell, for the port that was ADAPTED and renamed.** The tool picks
+  distinctive identifiers out of a commit and greps the target branches for them, on the stated
+  assumption that adaptation "does not usually rename the identifier the fix turns on". Measured on a
+  four-branch firmware tree the day this was written: it called one commit `absent` on all three
+  targets, and the fix is PRESENT on all three -- two of them call the new function, and the third,
+  which has a different port model, does the same job through an array index. Three false ABSENTs,
+  the direction that costs a day, in the one commit it was pointed at.
+
+  What crossed unchanged was the REASONING. A capitalised phrase from the commit's own comment was on
+  all four branches, and one phrase was on the three PORTS and not on the original -- whoever adapted
+  it explained it in place. So a cell that finds no code but finds the commit's own prose now reads
+  `absent+PROSE`, which says: the port probably landed under another name, go and read it. It is
+  never evidence the code is there, and the legend says so.
+
+  Two things the measurement settled, both of which the obvious implementation gets wrong. Single
+  words are useless -- one word from that commit matched thirty-plus times on every branch -- so only
+  multi-word phrases count. And the rule must take SHOUTED phrases first: a 4-word window of long
+  words picked wording that the ports had rewritten, while the phrase that had crossed verbatim was
+  unextractable because two of its words are three letters long. A capitalised phrase is the part of
+  a comment people move without rewriting.
+
+  Costs nothing on a healthy run: the extra grep is asked only for a cell that already came back
+  `absent` or `no-tokens`. `--no-prose` turns it off.
+
 ## 2026-09-27
 
 ### Added
