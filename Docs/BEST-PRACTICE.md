@@ -396,6 +396,37 @@ because those are the answers you stop reading at.
 
 ---
 
+### A trace is not a test, and must never be tabled beside one
+
+Reading the code and concluding what it does is a *hypothesis*. Running it is a *result*. Both are
+useful; presenting them in the same table is not, because the reader cannot tell which row they can act
+on — and neither can you, a week later.
+
+Measured: a two-direction routing mode was fixed in one direction and verified on hardware. The other
+direction was reported "already correct" on the strength of reading the function that chooses the
+destination, and both rows went into one table. The owner had **measured** that direction sending to
+both destinations at once. The reading lost. Worse, the reading was *locally correct* — the narrowing it
+described really is in that function — and still wrong about the system, because the traffic reaches it
+by a path the reading never considered.
+
+So:
+
+  * **Label the provenance of every claim, in the artefact itself.** "measured, on <what>, <when>" or
+    "source trace, not run". A table of results with one traced row is a table of results.
+  * **When a measurement contradicts your reading, the measurement wins and the reading is the thing to
+    explain.** The useful question is not "why should the code do what I said" but "what path does the
+    traffic actually take". That question is answerable; the other one is advocacy.
+  * **A green test on the adjacent path is worse than no test**, because it reads as coverage. The wrap-
+    driven version of that same cell passed — on a build whose relevant code was byte-identical to the
+    one that failed in the field. It proved the wrap path and was silent about the pin path, and only a
+    label saying WHICH PATH IT DROVE keeps that honest.
+
+**The cheap habit that prevents all of it: before trusting a result, say out loud what the instrument
+touched.** Not what it concluded — what it physically exercised. Most of the errors above survive a
+careful look at the conclusion and die instantly at that question.
+
+---
+
 ### An instrument that fires on every run cannot be read — separate the quantity from the verdict
 
 A checker reported names that hold one concept in two different units. Four did, and all four were
