@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-shared_paths - is a directory that MUST be the same on every branch actually the same?
+shared_paths - is a path that MUST be the same on every branch actually the same?
 
 WHY THIS EXISTS
 ---------------
@@ -25,7 +25,10 @@ work that silently does not exist for most of the people who have the repository
 WHY TREE HASHES, NOT A DIFF
 ---------------------------
 `git rev-parse <branch>:<path>` is the tree object for that directory on that branch: one hash
-over the whole subtree, content and names. Equal hashes mean byte-identical, with no walking and
+over the whole subtree, content and names. A single FILE works identically -- the same command
+returns its blob hash -- so a shared path may be a file, and CLAUDE.md is one: it drifted to 98
+lines short on three branches, four whole rules that a session on those branches never saw, because
+nothing compared it. Equal hashes mean byte-identical, with no walking and
 no diff. Branches are then GROUPED by hash, so the report is "three agree, one differs" -- which is
 almost always the shape -- instead of N-squared comparisons a reader has to fold together.
 
