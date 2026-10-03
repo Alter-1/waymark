@@ -3359,6 +3359,72 @@ def export_json(con: sqlite3.Connection, path: Path, stats: dict) -> None:
         json.dump(data, f, ensure_ascii=False, sort_keys=True)
 
 
+def report_unpublished_kb(paths: list[Path]) -> None:
+    """Is the knowledge base REACHING anyone, or does it only exist on this disk?
+
+    *** THE KB IS KEPT IN GIT SO THAT IT TRAVELS. An unpushed KB has none of the properties it was
+    put in git for. *** Measured 2026-10-03: a project's `kb` branch stood 77 commits and three
+    days ahead of its remote, across 514 entry files -- every fact recorded in that window existed
+    on one disk, which is precisely the state the design was meant to make impossible.
+
+    IT DRIFTS BECAUSE NOTHING SURFACES IT. The KB lives on an ORPHAN branch in a SEPARATE worktree,
+    so its commits never appear in the code tree's `git status` and never ride along when a code
+    branch is pushed. There is no moment at which a person is shown that the knowledge has not
+    left the building -- so this is that moment, hooked where a KB edit must already come back.
+
+    Three stages of the same failure, reported in the order they happen:
+      - entries EDITED and not committed -- the fix sitting in a worktree for a day;
+      - commits made and NOT PUSHED -- the 77-commit case;
+      - a branch with NO UPSTREAM at all, which can never be pushed by habit.
+
+    Silent when there is nothing to say. An instrument that fires on every run cannot be read, and
+    this one would otherwise fire on every single rebuild during ordinary work.
+    """
+    for path in paths:
+        # `.local` IS LOCAL BY DESIGN -- the suffix is the whole point of a scratch KB beside the
+        # shared one, so reporting it as unpublished is noise that teaches people to ignore the rest.
+        if path.name.endswith(".local") or not path.exists():
+            continue
+        top = path if path.is_dir() else path.parent
+
+        def g(*args: str) -> str | None:
+            try:
+                r = subprocess.run(["git", "-C", str(top), *args],
+                                   capture_output=True, text=True, timeout=10)
+            except Exception:                                   # noqa: BLE001
+                return None
+            return r.stdout.strip() if r.returncode == 0 else None
+
+        if g("rev-parse", "--git-dir") is None:
+            continue                                            # not in git at all: not our business
+        branch = g("rev-parse", "--abbrev-ref", "HEAD")
+        if not branch or branch == "HEAD":
+            continue                                            # detached: nothing to push TO
+
+        dirty = g("status", "--porcelain")
+        if dirty:
+            n = len([x for x in dirty.splitlines() if x.strip()])
+            print("\nKB NOT COMMITTED: %d file(s) changed in %s (branch %s)\n"
+                  "  recorded knowledge that is not even in git yet -- commit it there, not in the "
+                  "code tree:\n    git -C %s add -u && git -C %s commit"
+                  % (n, top, branch, top, top), file=sys.stderr)
+
+        if g("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") is None:
+            print("\nKB HAS NO UPSTREAM: %s (branch %s)\n"
+                  "  it cannot be pushed by habit, so it never will be:\n"
+                  "    git -C %s push -u origin %s" % (top, branch, top, branch), file=sys.stderr)
+            continue
+
+        ahead = g("rev-list", "--count", "@{u}..HEAD")
+        if ahead and ahead != "0":
+            oldest = g("log", "--format=%ad", "--date=short", "@{u}..HEAD") or ""
+            since = oldest.splitlines()[-1] if oldest.splitlines() else "?"
+            print("\nKB UNPUBLISHED: %s commit(s) on %s not pushed, oldest %s\n"
+                  "  the KB is in git so it reaches a clone, another machine and the mirror -- "
+                  "unpushed it does none of that:\n    git -C %s push"
+                  % (ahead, branch, since, top), file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build repo source architecture index.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Output SQLite DB path")
@@ -3602,6 +3668,14 @@ def main() -> int:
         gen_skills.main_quiet()
     except Exception as exc:                                    # noqa: BLE001
         print(f"\nskills: not generated ({exc})", file=sys.stderr)
+
+    # IS THE KNOWLEDGE LEAVING THIS DISK? Hooked here for the same reason the skills projection is:
+    # a KB edit must already come back through a rebuild, and a check needing its own command is the
+    # command nobody runs. Never fatal -- a git question must not cost you the index.
+    try:
+        report_unpublished_kb(annotation_paths)
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"\nkb publish check: skipped ({exc})", file=sys.stderr)
     return 0
 
 
