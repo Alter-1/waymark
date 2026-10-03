@@ -269,7 +269,28 @@ DEFAULT_JSON = default_index_path("json")
 
 
 def rel(path: Path) -> str:
-    return path.relative_to(REPO_ROOT).as_posix()
+    """The index key for a file: repo-relative where possible, absolute where not.
+
+    *** A ROOT MAY POINT OUTSIDE THE REPOSITORY, and this used to crash on it. *** `roots` is
+    resolved as `REPO_ROOT / root`, so an absolute entry replaces the repo root entirely and
+    iter_source_files() walks it quite happily; _drop_gitignored() then keeps those files on
+    purpose, because git knows nothing about them. This function was the one step that did not
+    agree: a bare relative_to() raises ValueError, and plan_incremental() calls it for EVERY file
+    before anything else runs. Measured 2026-10-03 adding an ESP-IDF checkout as a second root to
+    an application repository -- the whole run died on the first external file, in 0.8 s, with a
+    traceback from pathlib and no indication that the configuration was the cause.
+
+    So absolute roots were HALF-SUPPORTED: documented as allowed for `annotations`, accepted by the
+    walk, and fatal in the planner. They now work. The key for an external file is its absolute
+    path, which is stable, unique, and still resolves if anything joins it to REPO_ROOT, since
+    Path("/repo") / "/abs" is "/abs".
+
+    rel_or_text() has had this fallback all along for a different caller; this is the same idiom.
+    """
+    try:
+        return path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def rel_or_text(path: Path) -> str:
@@ -1313,7 +1334,21 @@ def lex_source(text: str, ext: str) -> LexedSource:
 
 
 def module_for(path: Path) -> str:
-    parts = rel(path).split("/")
+    key = rel(path)
+    # AN EXTERNAL FILE HAS AN ABSOLUTE KEY (see rel()), so parts[0] is the empty string before the
+    # leading slash -- which would file every file of an external root under one blank module and
+    # make `module` useless exactly where it is most wanted, telling an SDK's code apart from the
+    # application's. Name the module after the directory below a recognisable container instead:
+    # for an ESP-IDF or similar tree that is the component, which is the grouping a reader means.
+    if key.startswith("/"):
+        parts = [p for p in key.split("/") if p]
+        for marker in ("components", "managed_components", "src", "lib"):
+            if marker in parts:
+                i = parts.index(marker)
+                if i + 1 < len(parts) - 1:          # a directory, not the file itself
+                    return parts[i + 1]
+        return parts[-2] if len(parts) >= 2 else key
+    parts = key.split("/")
     if len(parts) >= 2 and parts[0] == "AV":
         return "/".join(parts[:3])
     return parts[0]
