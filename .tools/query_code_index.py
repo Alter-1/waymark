@@ -1140,10 +1140,31 @@ def main() -> int:
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)
     elif args.cmd == "annotation":
+        # *** EXACT NAME FIRST. *** This ordered by `kind, name` alone, which is alphabetical with no
+        # relevance at all: `concept` sorts before `feature`, so an entry that merely MENTIONS the
+        # term outranked the entry actually called it. Measured 2026-10-03 -- `annotation tx-power`
+        # returned at-wp-is-tx-power-not-password, `annotation aes256` returned
+        # aes-parallel-uart-crash-2026-08-05, and a KB whose entries cross-reference each other made
+        # it worse, since every link is another body hit. Short names were worst affected, and those
+        # are exactly the ones used as pointers: the documented examples are `wifi`, `tx-power`,
+        # `net-wrapper`, `failover`, and source comments cite entries by name on the assumption that
+        # the name resolves to the entry.
+        #
+        # So the brief default -- a few lines of the FIRST row -- was showing the wrong entry, and
+        # with --limit it could omit the named one entirely. Same idiom as the `constant` arm above:
+        # exact name, then a name fragment, then a body-only match; one query, best match on top.
         term = f"%{args.term}%"
         cur = con.execute(
-            "SELECT name, kind, value FROM annotations WHERE name LIKE ? OR value LIKE ? ORDER BY kind, name LIMIT ?",
-            (term, term, args.limit + 1),
+            """
+            SELECT name, kind, value FROM annotations
+            WHERE name LIKE :frag OR value LIKE :frag
+            ORDER BY CASE WHEN name = :n THEN 0
+                          WHEN name LIKE :frag THEN 1
+                          ELSE 2 END,
+                     kind, name
+            LIMIT :lim
+            """,
+            {"n": args.term, "frag": term, "lim": args.limit + 1},
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.term)
     elif args.cmd == "commits":
