@@ -86,6 +86,35 @@ def _external_stores() -> list:
 EXTERNAL_STORES = _external_stores()
 
 
+def _reference_kbs() -> list[dict]:
+    """Other projects' knowledge bases, readable here but never ours to write.
+
+    *** THIS IS REFERENCE, NOT MERGE. *** Adding another project's KB to `annotations` would make its
+    entries indistinguishable from this project's own, which is the failure it is meant to prevent:
+    one project's knowledge quoted as though it described this project's code. Declared instead as
+
+        "reference_kbs": [{"prefix": "fbi", "path": "~/m/work/kb/fbi"}]
+
+    and every row carries its prefix in `annotations.store`, so a query can label it, rank it below
+    local answers, and the consumers that must not see it can exclude it by one WHERE clause.
+
+    A project that configures none loses nothing.
+    """
+    out = []
+    for item in PROJECT.get("reference_kbs") or []:
+        if not isinstance(item, dict):
+            continue
+        prefix = str(item.get("prefix") or "").strip()
+        raw = str(item.get("path") or "").strip()
+        if not prefix or not raw or prefix == "":
+            continue
+        out.append({"prefix": prefix, "path": Path(raw).expanduser()})
+    return out
+
+
+REFERENCE_KBS = _reference_kbs()
+
+
 def external_store_hint(target: str) -> str:
     """The prefixed spelling for a bare target that names an entry in a configured store, else "".
 
@@ -904,7 +933,14 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
             status TEXT NOT NULL DEFAULT 'n/a',
             evidence TEXT NOT NULL DEFAULT 'unknown',
             evidence_note TEXT NOT NULL DEFAULT '',
-            value TEXT NOT NULL
+            value TEXT NOT NULL,
+            -- WHICH KB THIS CAME FROM. '' is THIS project's own; anything else is the prefix of a
+            -- reference KB belonging to another project (see `reference_kbs` in kb.config.json).
+            -- DEFAULT '' keeps every existing reader correct without touching it: a query that does
+            -- not mention `store` sees local and referenced entries alike, which is what a keyword
+            -- search wants. The consumers that must NOT see external rows say so explicitly, and
+            -- each has a reason written at the site.
+            store TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS annotations_status_idx ON annotations(status);
 
@@ -987,6 +1023,30 @@ def init_db(con: sqlite3.Connection, wipe: bool = True) -> None:
         CREATE INDEX IF NOT EXISTS branch_symbols_status_idx ON branch_symbols(status);
         """
     )
+
+    # *** ADD A COLUMN TO AN INDEX THAT PREDATES IT. *** `CREATE TABLE IF NOT EXISTS` is a no-op on an
+    # existing table, so a column added to the schema above does NOT appear in a database built by an
+    # older engine -- and the very next INSERT names it and fails with "no such column". That would
+    # break every existing index on the first run after an upgrade, which is the worst possible
+    # moment to find out. Checked and added explicitly instead; ALTER TABLE ADD COLUMN with a DEFAULT
+    # is cheap and does not rewrite rows.
+    for _table, _col, _decl in (("annotations", "store", "TEXT NOT NULL DEFAULT ''"),):
+        try:
+            _have = [r[1] for r in con.execute("PRAGMA table_info(%s)" % _table)]
+            if _have and _col not in _have:
+                con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (_table, _col, _decl))
+        except sqlite3.Error:
+            pass        # a table that is about to be created fresh needs nothing
+    # *** AND THE INDEX ON IT GOES HERE, NOT IN THE SCHEMA SCRIPT ABOVE. *** Measured while adding
+    # `store`: on an existing database `CREATE TABLE IF NOT EXISTS` is a no-op, so a
+    # `CREATE INDEX ... ON annotations(store)` placed in that same script runs BEFORE the column can
+    # possibly exist and takes the whole executescript down with "no such column: store" -- on an
+    # incremental build, which is every build. An index over a migrated column must follow the
+    # migration.
+    try:
+        con.execute("CREATE INDEX IF NOT EXISTS annotations_store_idx ON annotations(store)")
+    except sqlite3.Error:
+        pass
 
 
 def iter_source_files(roots: list[str]) -> list[Path]:
@@ -2036,8 +2096,10 @@ def link_commits(con: sqlite3.Connection) -> int:
     """Fill commit_links from each feature's `commits` list."""
     commits = git_commit_map()
     inserted = 0
+    # LOCAL ONLY: a referenced KB's `commits` name SHAs in ANOTHER repository, so resolving them
+    # here would report every one of them as missing and bury the local ones that really are.
     for name, kind, status, value in con.execute(
-        "SELECT name, kind, status, value FROM annotations"
+        "SELECT name, kind, status, value FROM annotations WHERE store=''"
     ).fetchall():
         try:
             item = json.loads(value)
@@ -2093,8 +2155,12 @@ def link_annotations_to_symbols(con: sqlite3.Connection) -> int:
     AMBIGUOUS_AT = 3     # more definitions than this and a bare mention proves nothing
 
     inserted = 0
+    # *** LOCAL ONLY, AND THIS ONE MATTERS MOST. *** A referenced entry's files and symbols belong to
+    # another project, so attaching it to a same-named symbol here would file one project's knowledge
+    # against another project's code -- automating exactly the mistake that reference KBs exist to
+    # prevent.
     for name, kind, status, evidence, value in con.execute(
-        "SELECT name, kind, status, evidence, value FROM annotations"
+        "SELECT name, kind, status, evidence, value FROM annotations WHERE store=''"
     ).fetchall():
         try:
             item = json.loads(value)
@@ -2496,10 +2562,10 @@ def insert_annotation(con: sqlite3.Connection, name: str, kind: str, item: dict)
             f"{name}: unknown evidence {raw_evidence.strip().lower()!r} "
             f"(use one of {'/'.join(EVIDENCE)}, optionally followed by ' -- <detail>')")
     con.execute(
-        "INSERT INTO annotations(name, kind, status, evidence, evidence_note, value)"
-        " VALUES(?,?,?,?,?,?)",
+        "INSERT INTO annotations(name, kind, status, evidence, evidence_note, value, store)"
+        " VALUES(?,?,?,?,?,?,?)",
         (name, kind, status, evidence, evidence_note,
-         json.dumps(item, ensure_ascii=False, sort_keys=True)),
+         json.dumps(item, ensure_ascii=False, sort_keys=True), _CURRENT_STORE[0]),
     )
     for claim in item.get("claims") or []:
         if isinstance(claim, str):
@@ -3244,12 +3310,19 @@ def read_kb_dir(root: Path) -> dict:
     return data
 
 
-def load_annotations(con: sqlite3.Connection, path: Path) -> None:
+# The store a load is currently attributing rows to. A cell rather than a parameter threaded through
+# every nested writer below: load_annotations() fans out into several insert helpers, and widening all
+# of their signatures to carry a constant would be a larger diff with more places to get it wrong.
+_CURRENT_STORE = [""]
+
+
+def load_annotations(con: sqlite3.Connection, path: Path, store: str = "") -> None:
     # Absent is not reported HERE: this function cannot tell a KB the project ASKED for from the
     # generic default in a repository that simply has no KB. The caller knows which it is and warns
     # there -- see the note at the load loop.
     if not path.exists():
         return
+    _CURRENT_STORE[0] = store
     # A DIRECTORY IS A KB TOO. It reconstructs the SAME document the single file produced, so every
     # line below this is untouched by the split -- which is what makes the migration verifiable:
     # the two readers must produce equal dicts, and that is a test, not an opinion.
@@ -3589,6 +3662,18 @@ def main() -> int:
                   f"  the index is being built WITHOUT any notes -- check `annotations` in "
                   f"kb.config.json, and that the file exists", file=sys.stderr)
         load_annotations(con, annotation_path)
+    # REFERENCED KBs last, each tagged with its prefix. A missing one is REPORTED rather than
+    # ignored: it was asked for by name, and a silently absent reference KB answers "no matches" in
+    # a way indistinguishable from the subject genuinely not being covered.
+    for _ref in REFERENCE_KBS:
+        if not _ref["path"].exists():
+            print("REFERENCE KB NOT FOUND: %s (prefix %s)\n"
+                  "  queries will answer as though that project had nothing to say -- check "
+                  "`reference_kbs` in kb.config.json" % (_ref["path"], _ref["prefix"]),
+                  file=sys.stderr)
+            continue
+        load_annotations(con, _ref["path"], store=_ref["prefix"])
+    _CURRENT_STORE[0] = ""
     # RECORDED, not just printed -- see the kb_status_problems comment in the schema. Written HERE,
     # while the connection is open and every annotation path has been parsed; the stderr summary at
     # the end of main() runs after the database is closed.

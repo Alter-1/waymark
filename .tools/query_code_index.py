@@ -1153,14 +1153,22 @@ def main() -> int:
         # So the brief default -- a few lines of the FIRST row -- was showing the wrong entry, and
         # with --limit it could omit the named one entirely. Same idiom as the `constant` arm above:
         # exact name, then a name fragment, then a body-only match; one query, best match on top.
+        # REFERENCED KBs ARE SHOWN, LABELLED, AND RANKED BELOW LOCAL. A row from another project's KB
+        # (see `reference_kbs`) carries that project's prefix in `annotations.store`, and is printed
+        # as `prefix:name` so it can never be read as this project's own -- which is the entire point
+        # of referencing rather than merging. Local wins ties, because when both projects describe a
+        # subject the local answer is the one about the code in front of you.
         term = f"%{args.term}%"
         cur = con.execute(
             """
-            SELECT name, kind, value FROM annotations
+            SELECT CASE WHEN store = '' THEN name ELSE store || ':' || name END AS name,
+                   kind, value
+            FROM annotations
             WHERE name LIKE :frag OR value LIKE :frag
             ORDER BY CASE WHEN name = :n THEN 0
                           WHEN name LIKE :frag THEN 1
                           ELSE 2 END,
+                     CASE WHEN store = '' THEN 0 ELSE 1 END,
                      kind, name
             LIMIT :lim
             """,
@@ -1201,12 +1209,16 @@ def main() -> int:
         )
         print_limited_rows(cur, args.limit, args.json, brief, query_text=args.symbol)
     elif args.cmd == "open":
+        # LOCAL ONLY, deliberately. `open` is a WORKLIST -- what this project still owes -- not a
+        # search. A referenced project's open questions are real, but they are not ours to close, and
+        # a worklist padded with work you cannot do is a worklist nobody reads. Use `annotation` to
+        # reach a referenced KB.
         term = f"%{args.term}%"
         if args.status == "all":
             cur = con.execute(
                 """
                 SELECT status, evidence, evidence_note, name, kind, value FROM annotations
-                WHERE name LIKE ? OR value LIKE ?
+                WHERE store = '' AND (name LIKE ? OR value LIKE ?)
                 ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'wontfix' THEN 1
                                      WHEN 'resolved' THEN 2 ELSE 3 END, name
                 LIMIT ?
@@ -1217,7 +1229,7 @@ def main() -> int:
             cur = con.execute(
                 """
                 SELECT status, evidence, evidence_note, name, kind, value FROM annotations
-                WHERE status = ? AND (name LIKE ? OR value LIKE ?)
+                WHERE store = '' AND status = ? AND (name LIKE ? OR value LIKE ?)
                 ORDER BY name LIMIT ?
                 """,
                 (args.status, term, term, args.limit + 1),
