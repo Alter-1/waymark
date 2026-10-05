@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -99,7 +100,8 @@ def _procedure_entries(items, repository_ids, selected_repository, task):
         raise ValueError('Context procedures must be an array')
     result = []
     ids = set()
-    task_text = task.casefold()
+    task_text = _normalise_procedure_text(task)
+    task_words = task_text.split()
     for raw in items:
         if not isinstance(raw, dict):
             raise ValueError('Every context procedure must be an object')
@@ -128,10 +130,34 @@ def _procedure_entries(items, repository_ids, selected_repository, task):
             if (not isinstance(alt_argv, list) or not alt_argv or
                     not all(isinstance(value, str) for value in alt_argv) or not alternative.get('reason')):
                 raise ValueError('Procedure %s diagnostic_only entries need argv and reason' % procedure_id)
-        item['matches_task'] = bool(task_text and any(trigger.casefold() in task_text for trigger in triggers))
+        scores = []
+        for trigger in triggers:
+            phrase = _normalise_procedure_text(trigger)
+            words = phrase.split()
+            if phrase and _ordered_phrase_in_task(words, task_words):
+                contiguous = (' ' + phrase + ' ') in (' ' + task_text + ' ')
+                scores.append((len(words), len(phrase), int(contiguous)))
+        item['match_score'] = max(scores) if scores else (0, 0)
+        item['matches_task'] = bool(scores)
         item['matches_repository'] = not targets or selected_repository in targets
         result.append(item)
     return result
+
+
+def _normalise_procedure_text(value):
+    """Match authored triggers across ordinary punctuation and command separators."""
+    return ' '.join(re.findall(r'[a-z0-9]+', value.casefold()))
+
+
+def _ordered_phrase_in_task(phrase_words, task_words):
+    """Allow qualifiers such as a version between the words of an authored trigger."""
+    position = 0
+    for word in phrase_words:
+        try:
+            position = task_words.index(word, position) + 1
+        except ValueError:
+            return False
+    return True
 
 
 def _git_context(path):
@@ -242,6 +268,19 @@ def project_context(manifest=None, cwd='.', task=''):
                 errors.append('%s is missing: %s' % (key, item['path']))
     resources['indexes'] = [_index_context(item, repositories) for item in resources['indexes']]
     procedures = _procedure_entries(data.get('procedures', []), set(repositories), selected, task)
+    # WHAT THE AGENT OWES IS KEYED TO THE REPOSITORY, NOT TO ITS OWN WORDING OF THE TASK.
+    # `relevant_procedures` ranks normalized trigger phrases by specificity. A generic trigger
+    # may also match a more specific one ("build VEO" inside "build VEO setup"), so callers must
+    # use the unique highest-ranked selection rather than taking the first declaration.
+    # `applicable_procedures` drops the task from the test: these are the declarations available
+    # in the selected checkout, whatever the request was called.
+    relevant = [item for item in procedures
+                if item['matches_task'] and item['matches_repository']]
+    relevant.sort(key=lambda item: item['match_score'], reverse=True)
+    selected_procedure = None
+    if relevant and (len(relevant) == 1 or
+                     relevant[0]['match_score'] > relevant[1]['match_score']):
+        selected_procedure = relevant[0]
 
     return {
         'schema_version': 1,
@@ -257,19 +296,13 @@ def project_context(manifest=None, cwd='.', task=''):
         'tools': resources['tools'],
         'protected_paths': resources['protected_paths'],
         'procedures': procedures,
-        # WHAT THE AGENT OWES IS KEYED TO THE REPOSITORY, NOT TO ITS OWN WORDING OF THE TASK.
-        # `relevant_procedures` is matched by substring against task text the CALLER writes, so a
-        # paraphrase ("build the firmware" against a trigger "release build") returns an empty list
-        # -- and an empty list reads as permission at exactly the boundary this exists to guard.
-        # `applicable_procedures` drops the task from the test: these are the declarations that own
-        # actions in the selected checkout, whatever the request was called. Matching still ranks.
         'applicable_procedures': [item for item in procedures if item['matches_repository']],
-        'relevant_procedures': [item for item in procedures
-                                if item['matches_task'] and item['matches_repository']],
+        'relevant_procedures': relevant,
+        'selected_procedure': selected_procedure,
         'retrieval_order': ['instructions', 'project manifest', 'knowledge sources',
                             'tool documentation', 'cross-branch history', 'source'],
         'index_policy': 'Query an existing index first. Rebuild only when missing, proven stale, or after authored knowledge/source changes that must be indexed.',
-        'action_policy': 'At an action boundary, a canonical procedure in applicable_procedures owns that action: use its argv/cwd and verify its declared success evidence. relevant_procedures ranks them against the task text and is a hint, not the obligation -- an empty list is not permission.',
+        'action_policy': 'At an action boundary, use the unique selected_procedure and its argv/cwd, then verify declared success evidence. If selected_procedure is null because no trigger matched or the highest-ranked match is tied, stop and clarify; applicable_procedures is inventory only, and an empty list is not permission.',
         'read_only': True,
         'errors': errors,
     }

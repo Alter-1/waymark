@@ -161,11 +161,29 @@ class WorkflowTests(unittest.TestCase):
         unrelated=w.project_context(manifest,cwd=repo,task='inspect a source symbol')
         self.assertEqual(unrelated['relevant_procedures'],[])
 
+    def test_context_selects_most_specific_procedure(self):
+        repo=self.repo('repo')
+        (repo/'seed').write_text('seed'); w.git(repo,'add','.'); w.git(repo,'commit','-m','fixture')
+        manifest=repo/'waymark.project.json'
+        manifest.write_text(json.dumps({'schema_version':1,'project':'fixture',
+            'repositories':[{'id':'repo','path':'.'}],
+            'procedures':[
+                {'id':'binary-build','triggers':['build VEO'],'repository_ids':['repo'],
+                 'canonical':{'argv':['tools/build.cmd'],'cwd':'repository'}},
+                {'id':'setup-build','triggers':['build VEO setup'],'repository_ids':['repo'],
+                 'canonical':{'argv':['tools/setup.cmd'],'cwd':'repository'}},
+            ]}))
+        report=w.project_context(manifest,cwd=repo,task='Please build VEO 2.0 setup now')
+        self.assertEqual([p['id'] for p in report['relevant_procedures']],
+                         ['setup-build','binary-build'])
+        self.assertEqual(report['selected_procedure']['id'],'setup-build')
+        self.assertEqual(report['selected_procedure']['canonical']['argv'],['tools/setup.cmd'])
+
     def test_context_paraphrased_task_still_owes_the_procedure(self):
         # THE POINT OF THE FEATURE IS THE BOUNDARY IT GUARDS, AND A PARAPHRASE MUST NOT OPEN IT.
-        # 'triggers' are matched by substring against task text the caller writes about itself, so
-        # wording the same request differently empties relevant_procedures -- and an empty list at a
-        # build boundary reads as "nothing owns this, use your judgement", which is the failure.
+        # Trigger phrases are normalized and matched in order against task text, but arbitrary
+        # paraphrasing still empties relevant_procedures -- and an empty list at a build boundary
+        # reads as "nothing owns this, use your judgement", which is the failure.
         # applicable_procedures answers the question the boundary actually asks: what owns an action
         # in THIS checkout. An empty --task cannot disarm it either.
         repo=self.repo('repo')

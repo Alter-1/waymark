@@ -21,14 +21,18 @@ markers. The read-only context receipt returns every declaration plus `relevant_
 to the exact task and selected repository. Agent instructions require a fresh receipt at meaningful
 action boundaries and verification of declared evidence.
 
-*** THE OBLIGATION IS NOT KEYED TO THE AGENT'S OWN WORDING. *** `triggers` are matched by substring
-against task text the caller writes about itself, so a paraphrase returns an empty
-`relevant_procedures` -- and an empty list at a build boundary reads as "nothing owns this, use your
-judgement", which is the failure the feature exists to prevent. `applicable_procedures` answers the
-question the boundary actually asks -- what owns an action in THIS checkout -- and carries the
-obligation; matching only ranks. `--task` is required for the same reason: its former default of
-`''` made every match false, so the cheapest invocation disarmed the rule silently and exited 0.
+*** THE OBLIGATION IS NOT KEYED TO THE AGENT'S OWN WORDING. *** Trigger phrases are normalized
+across ordinary punctuation and command separators, then matched in order against the task text so
+qualifiers such as a version may occur between trigger words. A generic
+trigger may also match a more specific one (for example, `build VEO` inside `build VEO setup`), so
+`relevant_procedures` is ranked by trigger specificity and `selected_procedure` is set only when the
+highest-ranked match is unique. If no trigger matches, or the top rank ties, the caller must stop
+and clarify; an empty list is not permission and a repository-wide declaration is not a license to
+guess. `applicable_procedures` is the checkout's inventory, not the action selection. `--task` is
+required for the same reason: its former default of `''` made every match false, so the cheapest
+invocation disarmed the rule silently and exited 0.
 
 The engine contains no product path or private topology. Those facts remain in the target project's
 manifest. `tests/test_workflow.py` proves a release-build request retrieves the canonical procedure,
-preserves its diagnostic-only distinction, and does not return it for unrelated source inspection.
+preserves its diagnostic-only distinction, selects the most-specific setup procedure over a generic
+build, and does not return it for unrelated source inspection.
