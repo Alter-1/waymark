@@ -12,9 +12,12 @@ Standard library only, no test framework, exit code 1 on failure.
 """
 
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +25,20 @@ sys.path.insert(0, str(ROOT / ".tools"))
 import verify_port as v  # noqa: E402
 
 FAILED = []
+
+
+def _remove_readonly(operation, path, exc_info):
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    operation(path)
+
+
+@contextmanager
+def git_temporary_directory():
+    root = tempfile.mkdtemp()
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, onerror=_remove_readonly)
 
 
 def check(name, cond, detail=""):
@@ -132,7 +149,7 @@ def build(td):
 
 
 def main():
-    with tempfile.TemporaryDirectory() as td:
+    with git_temporary_directory() as td:
         repo, fix, move, comment, undone, cmt = build(td)
         r = str(repo)
 

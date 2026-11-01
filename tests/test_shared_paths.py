@@ -16,14 +16,31 @@ Standard library only, no test framework, exit code 1 on failure.
 
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / ".tools" / "shared_paths.py"
 FAILED = []
+
+
+def _remove_readonly(operation, path, exc_info):
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    operation(path)
+
+
+@contextmanager
+def git_temporary_directory():
+    root = tempfile.mkdtemp()
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, onerror=_remove_readonly)
 
 
 def check(name, cond, detail=""):
@@ -72,7 +89,7 @@ def run(repo, *args):
 
 def main():
     print("shared_paths")
-    with tempfile.TemporaryDirectory() as td:
+    with git_temporary_directory() as td:
         repo = make_repo(td)
         git(repo, "branch", "rel1")
         git(repo, "branch", "rel2")

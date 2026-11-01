@@ -11,26 +11,38 @@ failure, and record the dead ends as well as the answer.
 
 Before any investigation, bugfix, porting, release-note work, or test planning:
 
-1. Identify the active repository and branch.
-2. Refresh the index when source or annotations may have changed:
+1. Discover the project context. If the project has `waymark.project.json`, run the read-only
+   bootstrap from the directory where the task starts:
 
 ```bash
-python3 .tools/index_code.py
+python3 .tools/workflow.py context --cwd . --task "<the request>"
 ```
 
-3. Run the integrity check and do not trust the KB if it fails:
+   Read the reported instruction files and identify the active repository, branch, related
+   repositories, authoritative knowledge roots, generated caches, tool documentation, and protected
+   paths. Report conflicts or missing required context instead of silently choosing one. **Say which
+   manifest you obeyed** -- discovery walks upward and a satellite `extends` anywhere, so the file
+   that won may not be the one you assumed. It is as trusted as the repository holding it.
+
+2. Query the existing index before rebuilding it. If one exists, run its integrity check and do not
+   trust it if the check fails:
 
 ```bash
 python3 .tools/query_code_index.py selftest
 ```
 
-4. Query claims before reading source deeply, especially disproved hypotheses:
+   An index is a cache, not the knowledge source. Do **not** rebuild merely because files may have
+   changed. Rebuild only when it is missing, a branch/root mismatch or another check proves it stale,
+   a query misses knowledge that the source KB demonstrably contains, or after you author knowledge
+   or source changes that must be indexed.
+
+3. Query claims before reading source deeply, especially disproved hypotheses:
 
 ```bash
 python3 .tools/query_code_index.py claim <keywords> --dead-first
 ```
 
-5. Query annotations, comments, symbols, and references before re-deriving behavior:
+4. Query annotations, comments, symbols, and references before re-deriving behavior:
 
 ```bash
 python3 .tools/query_code_index.py annotation <keywords>
@@ -40,6 +52,28 @@ python3 .tools/query_code_index.py refs <name>
 ```
 
 Use `--full` before relying on details from a compact result.
+
+5. A KB miss is not proof that no precedent exists: follow the receipt's `retrieval_order` before
+   concluding there is none, and check whether a maintained branch already has the infrastructure
+   you are about to invent.
+
+6. If a user supplies a durable fact that should have been found during bootstrap, treat that as a
+   retrieval defect. Record the fact in the project KB or manifest and add a cold-session regression
+   that proves the next context can recover it without the same prompt.
+
+7. Re-run the read-only context receipt at a meaningful action boundary such as build, test,
+   package, deploy, or release, retaining the exact requested action in `--task`. A canonical
+   procedure in `applicable_procedures` OWNS that action: its argv/cwd is mandatory, and
+   `relevant_procedures` only ranks them against your wording. *** AN EMPTY `relevant_procedures` IS
+   NOT PERMISSION *** -- it usually means you phrased the task differently from the trigger. Commands
+   listed as `diagnostic_only` may collect evidence but never substitute for the canonical action.
+   Verify the declared success artifacts or markers before reporting completion.
+
+8. Execute a documented command from its declared working directory and preserve its argv rather
+   than reconstructing a shell string. Run a state-changing command and its verifier as separate
+   invocations: if verification is misconfigured or fails, the receipt must still make clear that
+   the mutation already happened. Label an intentional negative-control failure as expected before
+   running it; do not present it like an operational error.
 
 ## Record What You Learn
 

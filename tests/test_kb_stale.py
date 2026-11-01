@@ -15,14 +15,31 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / ".tools"
 FAILED = []
+
+
+def _remove_readonly(operation, path, exc_info):
+    """Let Windows clean Git object files created read-only in a scratch repository."""
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    operation(path)
+
+
+@contextmanager
+def temporary_directory():
+    root = tempfile.mkdtemp()
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, onerror=_remove_readonly)
 
 
 def check(name, cond, detail=""):
@@ -89,7 +106,7 @@ def entry(name, file_, body=""):
 
 def main():
     # ---------------------------------------------------------------- it finds the real things
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         proj = scratch(td, {"a.cpp": CPP}, {
             "gone.md": entry("alive", "src/does_not_exist.cpp"),
             "range.md": entry("alive", "src/a.cpp", "see src/a.cpp:9000 for the detail"),
@@ -106,7 +123,7 @@ def main():
         check("and it exits non-zero so it can gate a build", rc != 0, "rc=%s" % rc)
 
     # ---------------------------------------------------------------- and stays quiet otherwise
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         proj = scratch(td, {"a.cpp": CPP}, {
             "ok.md": entry("alive", "src/a.cpp", "the definition is at src/a.cpp:6"),
         })
@@ -118,7 +135,7 @@ def main():
     # is usually Class::method; a KB entry is keyed on the bare name, because that is what a person
     # searches for. Matching the exact string reported 115 entries as "symbol missing" on the first
     # real run, and every one of them was present under its class.
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         proj = scratch(td, {"a.cpp": CPP}, {"bare.md": entry("alive", "src/a.cpp")})
         rc, out = stale(proj)
         check("a bare name resolves to its qualified symbol", "alive" not in out.split("freshness")[0],
@@ -127,7 +144,7 @@ def main():
     # A LINE IN THE FRONTMATTER PATH. `file:` is sometimes written "src/a.cpp:12" - the line is
     # provenance, not part of the path - and treating the whole string as a path reported six
     # perfectly good files as missing.
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         proj = scratch(td, {"a.cpp": CPP}, {"prov.md": entry("alive", "src/a.cpp:6")})
         rc, out = stale(proj)
         check("a line number in the frontmatter path is not part of the path",
@@ -136,7 +153,7 @@ def main():
     # A BASENAME IS NOT A FILE. Two files of the same name in one tree, and a citation valid in the
     # longer one: resolving by basename and taking the first match reported twelve false
     # out-of-range hits the moment a real project's roots were widened.
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         (Path(td) / "x").mkdir()
         proj = scratch(td, {"a.cpp": CPP}, {"dup.md": entry("alive", "src/sub/a.cpp",
                                                             "see a.cpp:40 for the detail")})
@@ -157,7 +174,7 @@ def main():
     # The shape this was written for: a file renamed on ONE branch, so entries naming the old path
     # look stale from the new one -- and the obvious repair breaks them where the old name is the
     # real and only name. Three answers, not two, and the third has to be said.
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         proj = scratch(td,
                        {"new_name.cpp": CPP},
                        {"e.md": entry("alive", "src/old_name.cpp",
@@ -197,7 +214,7 @@ def main():
               rc != 0, "rc=%s" % rc)
 
     # ------------------------------------------------- a KB it could not open is not a pass
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         proj = scratch(td, {"a.cpp": CPP}, {"e.md": entry("alive", "src/a.cpp")})
         (proj / "kb.config.json").write_text(json.dumps(
             {"project": {"name": "t", "roots": ["src"]}, "annotations": "Docs/nowhere"}),
@@ -214,7 +231,7 @@ def main():
     # with the entry -- a vendored test stub, say, while the real header lives in an SDK outside the
     # repository -- measuring the citation against it answers a question nobody asked, and one
     # permanent false positive means a non-zero exit forever.
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         # The stub must live somewhere the entry has nothing to do with -- in a FLAT project every
         # file shares the referent's directory, so it always looks related and the case proves
         # nothing. The real shape: a vendored component's host tests, while the entry is about
@@ -231,7 +248,7 @@ def main():
         check("...and the run can still be a gate", rc == 0, "rc=%s\n%s" % (rc, out[:400]))
 
     # the control: when the entry DOES name the file, a bad line is still caught
-    with tempfile.TemporaryDirectory() as td:
+    with temporary_directory() as td:
         proj2 = scratch(td, {"real.cpp": CPP},
                         {"e.md": entry("alive", "src/real.cpp", "see src/real.cpp:900\n")})
         rc2, out2 = stale(proj2)
