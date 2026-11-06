@@ -173,6 +173,30 @@ measured against stale output.
 after, a digest, a diff against the remote — check it. Reasoning that "this should have worked" is
 how a partial sync gets believed to be complete.
 
+**A background process's output is a file you have to budget for.** `nohup thing > log 2>&1 &` is a
+write with no ceiling. A GUI or capture tool logs per frame, so that log grows for as long as the
+process lives: one left running for an hour reached **119.7 GB** and filled a 468 GB volume twice.
+Send such output to `/dev/null`, or truncate the file on a schedule. The cost is not the wasted
+space — it is that **a full disk stops the shell itself**, because every command's output must be
+written somewhere, so even `df` fails and the diagnosis cannot run. You lose the ability to see the
+problem at the moment you acquire it.
+
+Two things follow, and the second is not obvious:
+
+* **Check the free space BEFORE writing anything large**, and size the write first. A minute of raw
+  video is gigabytes; a code index is gigabytes per branch. Refuse to start on a thin margin and say
+  so, rather than filling the disk and then asking what to delete.
+* **TRUNCATE a runaway file, do not delete it.** `: > the_file` frees the space immediately;
+  `rm` frees nothing while the writer holds the handle, so the disk stays full and you conclude the
+  file was not the cause. That misattribution cost an hour: the leftovers of an unrelated tool were
+  blamed, cleaned, and the volume filled again within minutes.
+
+**A temp file named after a dead process is garbage, and nothing collects it.** Tools that build a
+large artefact by writing `<name>.<pid>.tmp` and renaming at the end leave a full-size copy behind
+on every interrupted run. Seven of them, at 3.1 GB each, were sitting in one directory. Sweep them
+before you start, scoped to your own project's directory — never with a wildcard across shared
+`/tmp`, which is somebody else's state as well as yours.
+
 ---
 
 ### Verify the artefact the reader gets, not the source that produces it
