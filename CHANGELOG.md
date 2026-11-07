@@ -5,6 +5,41 @@ Notable changes to waymark, newest first.
 There are no version tags yet, so entries are dated. Each names what a **user** gets or stops
 getting; the commit messages carry the reasoning and the measurements behind them.
 
+## index: the JSON export is off by default, and a KB-only rebuild
+
+Contributed from a downstream project where a KB edit cost ten minutes and nobody checked their
+own keywords as a result.
+
+**`--kb-only` rebuilds just the KB tables, in place.** 2.4 s against minutes, because it skips
+both the source scan and the scratch copy. Safe without the copy because the KB half is already
+DELETEd and reloaded from the annotation files on every ordinary run; wrapped in BEGIN IMMEDIATE
+so an interrupt rolls back rather than leaving the tables half-loaded and queries answering "no
+matches", which reads as an empty topic rather than a broken build.
+
+**The browser JSON export is off by default (`--write-json` to ask for it).** It had no reader:
+`serve_code_index.py` forwards queries to `query_code_index.py`, which opens the SQLite, and
+`browse_code_index.sh` only tested that the file existed -- under an unsuffixed name the
+branch-slugged export never had, so that test never matched and every launch silently reindexed.
+Measured on one project: 2.8 GB per run, 76 of the 78 seconds of a KB-only rebuild, and a
+complete text duplicate of the database (symbols 751,121 rows, refs with full context,
+symbol_metadata 1,367,836 rows). The intended split was "JSON for small info, SQLite for large
+tables"; it had been inverted one table at a time, each added for completeness rather than for a
+reader. `--no-json` is still accepted, as a no-op.
+
+**`browse_code_index.sh` now tests the SQLite, and asks `index_code.py` for the path** instead of
+rebuilding the name in shell -- the slug sanitises branch names, so a branch like `test/0.1-foo`
+would otherwise become a directory.
+
+**The scratch copy is skipped on a full build**, where `init_db()` wipes everything it brought and
+`carry_persistent_tables()` reads from the real database anyway. An incremental build still needs
+the previous rows, so it still copies, preceded by a backup taken at most once a day. NO TIMING
+WIN IS CLAIMED: measured, a full run with the copy skipped was no faster, because the cost is the
+scanning. It is removed for being pointless on that path, not for being slow.
+
+STILL OPEN: a successful full run was observed leaving a 3.1 GB `<db>.<pid>.tmp-wal` behind even
+though `PRAGMA wal_checkpoint(TRUNCATE)` and `close()` both run before the rename. Observed, not
+explained.
+
 ## 2026-09-29
 
 ### Changed

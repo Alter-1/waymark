@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import time
 import sqlite3
 import subprocess
 import sys
@@ -3502,7 +3503,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build repo source architecture index.")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="Output SQLite DB path")
     parser.add_argument("--json-output", default=str(DEFAULT_JSON), help="Output browser JSON path")
-    parser.add_argument("--no-json", action="store_true", help="Do not write browser JSON export")
+    # *** THE JSON EXPORT IS OFF BY DEFAULT: IT HAD NO READER. ***
+    #
+    # serve_code_index.py forwards every query to query_code_index.py, which opens the SQLITE;
+    # browse_code_index.sh only tested that the file EXISTED, and tested an unsuffixed name that the
+    # branch-slugged export never had. Measured on one real project: 2.8 GB written per run, 76 of
+    # the 78 seconds of a KB-only rebuild, and a complete text duplicate of the database -- symbols
+    # 751,121 rows, refs with full context, symbol_metadata 1,367,836 rows. The intended split was
+    # "JSON for small info, SQLite for large tables"; it had been inverted one table at a time, each
+    # added for completeness rather than for a reader.
+    #
+    # --no-json is kept and accepted so existing callers do not break; it is now a no-op.
+    parser.add_argument("--no-json", action="store_true",
+                        help="Accepted and ignored: the JSON export is off by default now.")
+    parser.add_argument("--write-json", action="store_true",
+                        help="Write the browser JSON export (off by default: no reader, and a full "
+                             "text duplicate of the SQLite).")
+    parser.add_argument("--kb-only", action="store_true",
+                        help="Rebuild ONLY the KB tables, IN PLACE. Seconds instead of minutes, "
+                             "because it skips both the source scan and the scratch copy. Requires "
+                             "an existing index.")
     parser.add_argument(
         "--annotations",
         action="append",
@@ -3557,10 +3577,64 @@ def main() -> int:
     except sqlite3.Error:
         meta_state = (0, "", 0)
     annotation_digest = digest_state([annotation_digest, list(meta_state)])
+    # KB-ONLY REBUILD -- IN PLACE, which is the whole point.
+    #
+    # A normal build copies the entire database to a scratch file and rescans, so a failed run cannot
+    # leave a damaged index. Right for a source rebuild, absurd for an annotation edit: measured on
+    # one real project a KB-only run this way takes 2.4 s against minutes, and the practical effect
+    # of the slow loop was that nobody verified their own keywords -- which is how entries end up
+    # unfindable by the symptom they describe.
+    #
+    # Safe without the scratch copy because the KB half is REDERIVABLE: it is DELETEd and reloaded
+    # from the annotation files on every ordinary run anyway, so the worst an interrupted kb-only run
+    # can leave is empty KB tables, which the next run of either kind refills. Wrapped in BEGIN
+    # IMMEDIATE regardless, so an interrupt rolls back rather than leaving them half-loaded and
+    # queries answering "no matches" -- which reads as an empty topic rather than a broken build.
+    #
+    # It deliberately does NOT touch source_digest: the source tables are untouched.
+    if args.kb_only:
+        if not Path(args.db).exists():
+            print("--kb-only needs an existing index; run a full build first", file=sys.stderr)
+            return 2
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            for table in KB_TABLES:
+                con.execute(f"DELETE FROM {table}")
+            load_params(con)
+            for annotation_path in annotation_paths:
+                load_annotations(con, annotation_path)
+            for _ref in REFERENCE_KBS:
+                if _ref["path"].exists():
+                    load_annotations(con, _ref["path"], store=_ref["prefix"])
+            _CURRENT_STORE[0] = ""
+            link_annotations_to_symbols(con)
+            con.execute("DELETE FROM kb_status_problems")
+            con.executemany("INSERT INTO kb_status_problems(problem) VALUES(?)",
+                            [(_p,) for _p in annotation_status_problems])
+            con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                        ("annotation_digest", annotation_digest))
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+        stats = current_stats(con)
+        stats["kb_only"] = True
+        if args.write_json:
+            export_json(con, Path(args.json_output), stats)
+        con.close()
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import gen_skills
+            gen_skills.main_quiet()
+        except Exception as exc:
+            print(f"\nskills: not generated ({exc})", file=sys.stderr)
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        return 0
+
     if not args.force and index_is_fresh(con, source_digest, annotation_digest):
         stats = current_stats(con)
         stats["cached"] = True
-        if not args.no_json and not Path(args.json_output).exists():
+        if args.write_json and not Path(args.json_output).exists():
             export_json(con, Path(args.json_output), stats)
         print(json.dumps(stats, indent=2, sort_keys=True))
         return 0
@@ -3590,6 +3664,22 @@ def main() -> int:
     #  one transaction -- but only by accident: one executescript added mid-build would silently
     #  reopen the hole. This makes it correct by construction instead.)
     real_db = Path(args.db)
+    # A BACKUP AT MOST ONCE A DAY, instead of a full copy per run. The index is derived and
+    # gitignored, so losing it costs a rebuild and no data; the atomic rename below is what protects
+    # a run in progress. This is the fallback for the one case the rename cannot cover -- an index
+    # that was already damaged before this run started.
+    def _backup_if_stale(db: Path, max_age_s: int = 24 * 3600) -> None:
+        if not db.exists():
+            return
+        bak = db.with_name(db.name + ".bak")
+        try:
+            if bak.exists() and (time.time() - bak.stat().st_mtime) < max_age_s:
+                return
+            shutil.copy2(db, bak)
+            print("index backup -> %s" % bak.name, file=sys.stderr)
+        except OSError as exc:
+            print("index backup skipped (%s)" % exc, file=sys.stderr)
+
     build_db = real_db.with_name(f"{real_db.name}.{os.getpid()}.tmp")
     for leftover in (build_db, Path(str(build_db) + "-wal"), Path(str(build_db) + "-shm")):
         if leftover.exists():
@@ -3599,7 +3689,15 @@ def main() -> int:
         # Checkpoint first: copying the main file alone would drop anything still in the -wal.
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         con.close()
-        shutil.copy2(real_db, build_db)
+        # ONLY an incremental build needs the previous rows. A full build calls init_db() right
+        # after, which wipes everything the copy brought, and carry_persistent_tables() reads the
+        # history tables from real_db directly -- so on that path the copy writes gigabytes to
+        # produce a file that is then emptied. Removing it is justified by being pointless there,
+        # NOT by a timing win: measured, a full run with the copy skipped was no faster, because the
+        # cost is the scanning.
+        if plan is not None:
+            _backup_if_stale(real_db)
+            shutil.copy2(real_db, build_db)
     else:
         con.close()
     # A BUILD THAT DIES MUST NOT LEAVE ITS SCRATCH FILE BEHIND -- it is a full-sized copy of the
@@ -3723,7 +3821,7 @@ def main() -> int:
         stats["rescanned"] = len(todo)
         stats["dropped"] = len(gone)
         stats["refs_rescan"] = refs_scope
-    if not args.no_json:
+    if args.write_json:
         export_json(con, Path(args.json_output), stats)
     # PUBLISH. Closing checkpoints the WAL and removes the -wal/-shm sidecars, so what gets renamed
     # is one self-contained file; renaming a live WAL database without them loses committed rows.
